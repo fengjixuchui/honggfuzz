@@ -23,11 +23,14 @@
 
 #include "libhfcommon/files.h"
 
+#include <arpa/inet.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
 #include <limits.h>
+#include <netinet/in.h>
+#include <netinet/ip.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -327,7 +330,7 @@ size_t files_parseSymbolFilter(const char* srcFile, char*** filterList) {
             symbolsRead = 0;
             break;
         }
-        strncpy((*filterList)[symbolsRead], lineptr, strlen(lineptr));
+        snprintf((*filterList)[symbolsRead], strlen(lineptr), "%s", lineptr);
         symbolsRead++;
     }
 
@@ -436,32 +439,40 @@ void* files_mapSharedMem(size_t sz, int* fd, const char* name, const char* dir) 
     return ret;
 }
 
-bool files_readPidFromFile(const char* fileName, pid_t* pidPtr) {
-    FILE* fPID = fopen(fileName, "rbe");
-    if (fPID == NULL) {
-        PLOG_W("Couldn't fopen('%s', mode='rbe')", fileName);
-        return false;
+sa_family_t files_sockFamily(int sock) {
+    struct sockaddr addr;
+    socklen_t addrlen = sizeof(addr);
+
+    if (getsockname(sock, &addr, &addrlen) == -1) {
+        PLOG_W("getsockname(sock=%d)", sock);
+        return AF_UNSPEC;
     }
 
-    char* lineptr = NULL;
-    size_t lineSz = 0;
-    ssize_t ret = getline(&lineptr, &lineSz, fPID);
-    fclose(fPID);
-    if (ret == -1) {
-        if (lineSz == 0) {
-            LOG_W("Empty PID file (%s)", fileName);
-            fclose(fPID);
-            free(lineptr);
-            return false;
+    return addr.sa_family;
+}
+
+const char* files_sockAddrToStr(const struct sockaddr* sa) {
+    static __thread char str[4096];
+
+    if (sa->sa_family == AF_INET) {
+        struct sockaddr_in* sin = (struct sockaddr_in*)sa;
+        if (inet_ntop(sin->sin_family, &sin->sin_addr.s_addr, str, sizeof(str))) {
+            util_ssnprintf(str, sizeof(str), "/%hd", ntohs(sin->sin_port));
+        } else {
+            snprintf(str, sizeof(str), "IPv4 addr conversion failed");
         }
+        return str;
+    }
+    if (sa->sa_family == AF_INET6) {
+        struct sockaddr_in6* sin6 = (struct sockaddr_in6*)sa;
+        if (inet_ntop(sin6->sin6_family, sin6->sin6_addr.s6_addr, str, sizeof(str))) {
+            util_ssnprintf(str, sizeof(str), "/%hd", ntohs(sin6->sin6_port));
+        } else {
+            snprintf(str, sizeof(str), "IPv6 addr conversion failed");
+        }
+        return str;
     }
 
-    *pidPtr = atoi(lineptr);
-    free(lineptr);
-    if (*pidPtr < 1) {
-        LOG_W("Invalid PID read from '%s' file", fileName);
-        return false;
-    }
-
-    return true;
+    snprintf(str, sizeof(str), "Unsupported sockaddr family=%d", (int)sa->sa_family);
+    return str;
 }

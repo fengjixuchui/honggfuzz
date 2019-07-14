@@ -152,6 +152,9 @@ static void fuzz_setDynamicMainState(run_t* run) {
         return;
     }
 
+    LOG_I("Entering phase 2/3: Switching to Dynamic Main (Feedback Driven Mode)");
+    ATOMIC_SET(run->global->feedback.state, _HF_STATE_DYNAMIC_SWITCH_TO_MAIN);
+
     for (;;) {
         /* Check if all threads have already reported in for changing state */
         if (ATOMIC_GET(cnt) == run->global->threads.threadsMax) {
@@ -160,10 +163,10 @@ static void fuzz_setDynamicMainState(run_t* run) {
         if (fuzz_isTerminating()) {
             return;
         }
-        usleep(1000 * 10); /* Check every 10ms */
+        util_sleepForMSec(10); /* Check every 10ms */
     }
 
-    LOG_I("Entering phase 2/2: Dynamic Main");
+    LOG_I("Entering phase 3/3: Dynamic Main (Feedback Driven Mode)");
     snprintf(run->origFileName, sizeof(run->origFileName), "[DYNAMIC]");
     ATOMIC_SET(run->global->feedback.state, _HF_STATE_DYNAMIC_MAIN);
 
@@ -189,6 +192,9 @@ static void fuzz_perfFeedback(run_t* run) {
         run->linux.hwCnts.newBBCnt, run->global->linux.hwCnts.bbCnt);
 
     MX_SCOPED_LOCK(&run->global->feedback.feedback_mutex);
+    defer {
+        wmb();
+    };
 
     uint64_t softCntPc = 0;
     uint64_t softCntEdge = 0;
@@ -301,19 +307,22 @@ static bool fuzz_runVerifier(run_t* run) {
     }
 
     LOG_I("Verified crash for HASH: %" PRIx64 " and saved it as '%s'", backtrace, verFile);
-    ATOMIC_POST_INC(run->global->cnts.verifiedCrashesCnt);
+    ATOMIC_PRE_INC(run->global->cnts.verifiedCrashesCnt);
 
     return true;
 }
 
 static bool fuzz_fetchInput(run_t* run) {
-    if (fuzz_getState(run->global) == _HF_STATE_DYNAMIC_DRY_RUN) {
-        run->mutationsPerRun = 0U;
-        if (input_prepareStaticFile(run, /* rewind= */ false)) {
-            return true;
+    {
+        fuzzState_t st = fuzz_getState(run->global);
+        if (st == _HF_STATE_DYNAMIC_DRY_RUN || st == _HF_STATE_DYNAMIC_SWITCH_TO_MAIN) {
+            run->mutationsPerRun = 0U;
+            if (input_prepareStaticFile(run, /* rewind= */ false, true)) {
+                return true;
+            }
+            fuzz_setDynamicMainState(run);
+            run->mutationsPerRun = run->global->mutate.mutationsPerRun;
         }
-        fuzz_setDynamicMainState(run);
-        run->mutationsPerRun = run->global->mutate.mutationsPerRun;
     }
 
     if (fuzz_getState(run->global) == _HF_STATE_DYNAMIC_MAIN) {
@@ -322,7 +331,12 @@ static bool fuzz_fetchInput(run_t* run) {
                 LOG_E("input_prepareFileExternally() failed");
                 return false;
             }
-        } else if (!input_prepareDynamicInput(run)) {
+        } else if (run->global->exe.feedbackMutateCommand) {
+            if (!input_prepareDynamicInput(run, false)) {
+                LOG_E("input_prepareFileDynamically() failed");
+                return false;
+            }
+        } else if (!input_prepareDynamicInput(run, true)) {
             LOG_E("input_prepareFileDynamically() failed");
             return false;
         }
@@ -334,7 +348,12 @@ static bool fuzz_fetchInput(run_t* run) {
                 LOG_E("input_prepareFileExternally() failed");
                 return false;
             }
-        } else if (!input_prepareStaticFile(run, true /* rewind */)) {
+        } else if (run->global->exe.feedbackMutateCommand) {
+            if (!input_prepareStaticFile(run, true, false)) {
+                LOG_E("input_prepareFileDynamically() failed");
+                return false;
+            }
+        } else if (!input_prepareStaticFile(run, true /* rewind */, true)) {
             LOG_E("input_prepareFile() failed");
             return false;
         }
@@ -345,11 +364,15 @@ static bool fuzz_fetchInput(run_t* run) {
         return false;
     }
 
+    if (run->global->exe.feedbackMutateCommand && !input_feedbackMutateFile(run)) {
+        LOG_E("input_feedbackMutateFile() failed");
+        return false;
+    }
+
     return true;
 }
 
 static void fuzz_fuzzLoop(run_t* run) {
-    run->pid = 0;
     run->timeStartedMillis = 0;
     run->crashFileName[0] = '\0';
     run->pc = 0;
@@ -360,7 +383,8 @@ static void fuzz_fuzzLoop(run_t* run) {
     run->mainWorker = true;
     run->mutationsPerRun = run->global->mutate.mutationsPerRun;
     run->dynamicFileSz = 0;
-    run->dynamicFileCopyFd = -1,
+    run->dynamicFileCopyFd = -1;
+    run->tmOutSignaled = false;
 
     run->linux.hwCnts.cpuInstrCnt = 0;
     run->linux.hwCnts.cpuBranchCnt = 0;
@@ -384,7 +408,6 @@ static void fuzz_fuzzLoop(run_t* run) {
 }
 
 static void fuzz_fuzzLoopSocket(run_t* run) {
-    run->pid = 0;
     run->timeStartedMillis = 0;
     run->crashFileName[0] = '\0';
     run->pc = 0;
@@ -395,7 +418,8 @@ static void fuzz_fuzzLoopSocket(run_t* run) {
     run->mainWorker = true;
     run->mutationsPerRun = run->global->mutate.mutationsPerRun;
     run->dynamicFileSz = 0;
-    run->dynamicFileCopyFd = -1,
+    run->dynamicFileCopyFd = -1;
+    run->tmOutSignaled = false;
 
     run->linux.hwCnts.cpuInstrCnt = 0;
     run->linux.hwCnts.cpuBranchCnt = 0;
@@ -420,9 +444,11 @@ static void fuzz_fuzzLoopSocket(run_t* run) {
     LOG_D("------[ 2: fetch input");
     if (!fuzz_waitForExternalInput(run)) {
         /* Fuzzer could not connect to target, and told us to
-           restart it. Do it on the next iteration. */
+           restart it. Do it on the next iteration.
+           or: it crashed by fuzzing. Restart it too.
+           */
         LOG_D("------[ 2.1: Target down, will restart it");
-        run->hasCrashed = true;
+        run->pid = 0;  // make subproc_Run() restart it on next iteration
         return;
     }
 
@@ -445,7 +471,6 @@ static void* fuzz_threadNew(void* arg) {
     run_t run = {
         .global = hfuzz,
         .pid = 0,
-        .persistentPid = 0,
         .dynfileqCurrent = NULL,
         .dynamicFile = NULL,
         .dynamicFileFd = -1,
@@ -453,9 +478,6 @@ static void* fuzz_threadNew(void* arg) {
         .persistentSock = -1,
         .tmOutSignaled = false,
         .origFileName = "[DYNAMIC]",
-
-        .linux.attachedPid = 0,
-        .netbsd.attachedPid = 0,
     };
 
     /* Do not try to handle input files with socketfuzzer */
@@ -480,7 +502,6 @@ static void* fuzz_threadNew(void* arg) {
         if (run.global->mutate.mutationsPerRun == 0U && run.global->cfg.useVerifier &&
             !hfuzz->socketFuzzer.enabled) {
             if (ATOMIC_POST_INC(run.global->cnts.mutationsCnt) >= run.global->io.fileCnt) {
-                ATOMIC_POST_INC(run.global->threads.threadsFinished);
                 break;
             }
         }
@@ -488,14 +509,13 @@ static void* fuzz_threadNew(void* arg) {
         else if ((ATOMIC_POST_INC(run.global->cnts.mutationsCnt) >=
                      run.global->mutate.mutationsMax) &&
                  run.global->mutate.mutationsMax) {
-            ATOMIC_POST_INC(run.global->threads.threadsFinished);
             break;
         }
 
-        input_setSize(&run, run.global->mutate.maxFileSz);
         if (hfuzz->socketFuzzer.enabled) {
             fuzz_fuzzLoopSocket(&run);
         } else {
+            input_setSize(&run, run.global->mutate.maxFileSz);
             fuzz_fuzzLoop(&run);
         }
 
@@ -510,31 +530,17 @@ static void* fuzz_threadNew(void* arg) {
         }
     }
 
+    if (run.pid) {
+        kill(run.pid, SIGKILL);
+    }
+
     LOG_I("Terminating thread no. #%" PRId32 ", left: %zu", fuzzNo,
-        hfuzz->threads.threadsMax - run.global->threads.threadsFinished);
+        hfuzz->threads.threadsMax - ATOMIC_GET(run.global->threads.threadsFinished));
     ATOMIC_POST_INC(run.global->threads.threadsFinished);
-    pthread_kill(run.global->threads.mainThread, SIGALRM);
     return NULL;
 }
 
-static void fuzz_runThread(honggfuzz_t* hfuzz, pthread_t* thread, void* (*thread_func)(void*)) {
-    pthread_attr_t attr;
-
-    pthread_attr_init(&attr);
-    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE);
-    pthread_attr_setstacksize(&attr, _HF_PTHREAD_STACKSIZE);
-    pthread_attr_setguardsize(&attr, (size_t)sysconf(_SC_PAGESIZE));
-
-    if (pthread_create(thread, &attr, thread_func, (void*)hfuzz) < 0) {
-        PLOG_F("Couldn't create a new thread");
-    }
-
-    pthread_attr_destroy(&attr);
-
-    return;
-}
-
-void fuzz_threadsStart(honggfuzz_t* hfuzz, pthread_t* threads) {
+void fuzz_threadsStart(honggfuzz_t* hfuzz) {
     if (!arch_archInit(hfuzz)) {
         LOG_F("Couldn't prepare arch for fuzzing");
     }
@@ -547,7 +553,7 @@ void fuzz_threadsStart(honggfuzz_t* hfuzz, pthread_t* threads) {
         LOG_I("Entering phase - Feedback Driven Mode (SocketFuzzer)");
         hfuzz->feedback.state = _HF_STATE_DYNAMIC_MAIN;
     } else if (hfuzz->feedback.dynFileMethod != _HF_DYNFILE_NONE) {
-        LOG_I("Entering phase 1/2: Dry Run");
+        LOG_I("Entering phase 1/3: Dry Run");
         hfuzz->feedback.state = _HF_STATE_DYNAMIC_DRY_RUN;
     } else {
         LOG_I("Entering phase: Static");
@@ -555,16 +561,9 @@ void fuzz_threadsStart(honggfuzz_t* hfuzz, pthread_t* threads) {
     }
 
     for (size_t i = 0; i < hfuzz->threads.threadsMax; i++) {
-        fuzz_runThread(hfuzz, &threads[i], fuzz_threadNew);
-    }
-}
-
-void fuzz_threadsStop(honggfuzz_t* hfuzz, pthread_t* threads) {
-    for (size_t i = 0; i < hfuzz->threads.threadsMax; i++) {
-        void* retval;
-        if (pthread_join(threads[i], &retval) != 0) {
-            PLOG_F("Couldn't pthread_join() thread: %zu", i);
+        if (!subproc_runThread(
+                hfuzz, &hfuzz->threads.threads[i], fuzz_threadNew, /* joinable= */ true)) {
+            PLOG_F("Couldn't run a thread #%zu", i);
         }
     }
-    LOG_I("All threads done");
 }

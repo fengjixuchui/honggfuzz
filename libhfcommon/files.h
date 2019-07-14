@@ -24,11 +24,12 @@
 #ifndef _HF_COMMON_FILES_H_
 #define _HF_COMMON_FILES_H_
 
-#include "common.h"
-
 #include <stdbool.h>
 #include <stdint.h>
+#include <sys/socket.h>
 #include <unistd.h>
+
+#include "common.h"
 
 extern ssize_t files_readFileToBufMax(const char* fileName, uint8_t* buf, size_t fileMaxSz);
 
@@ -64,8 +65,10 @@ extern uint8_t* files_mapFileShared(const char* fileName, off_t* fileSz, int* fd
 
 extern void* files_mapSharedMem(size_t sz, int* fd, const char* name, const char* dir);
 
-extern bool files_readPidFromFile(const char* fileName, pid_t* pidPtr);
-
 extern size_t files_parseSymbolFilter(const char* inFIle, char*** filterList);
+
+extern sa_family_t files_sockFamily(int sock);
+
+extern const char* files_sockAddrToStr(const struct sockaddr* sa);
 
 #endif /* ifndef HF_COMMON_FILES */

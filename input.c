@@ -56,11 +56,13 @@ void input_setSize(run_t* run, size_t sz) {
     if (sz > run->global->mutate.maxFileSz) {
         PLOG_F("Too large size requested: %zu > maxSize: %zu", sz, run->global->mutate.maxFileSz);
     }
-    size_t old_sz = run->dynamicFileSz;
-    run->dynamicFileSz = sz;
-    if (run->global->cfg.only_printable && old_sz < sz) {
-        memset(run->dynamicFile, ' ', sz - old_sz);
+    /* ftruncate of a mmaped file fails under CygWin, it's also painfully slow under MacOS X */
+#if !defined(__CYGWIN__) && !defined(_HF_ARCH_DARWIN)
+    if (TEMP_FAILURE_RETRY(ftruncate(run->dynamicFileFd, sz)) == -1) {
+        PLOG_W("ftruncate(run->dynamicFileFd=%d, sz=%zu)", run->dynamicFileFd, sz);
     }
+#endif /* !defined(__CYGWIN__) && !defined(_HF_ARCH_DARWIN) */
+    run->dynamicFileSz = sz;
 }
 
 static bool input_getDirStatsAndRewind(honggfuzz_t* hfuzz) {
@@ -181,7 +183,7 @@ bool input_init(honggfuzz_t* hfuzz) {
         return false;
     }
 
-    int dir_fd = open(hfuzz->io.inputDir, O_DIRECTORY | O_RDONLY | O_CLOEXEC);
+    int dir_fd = TEMP_FAILURE_RETRY(open(hfuzz->io.inputDir, O_DIRECTORY | O_RDONLY | O_CLOEXEC));
     if (dir_fd == -1) {
         PLOG_W("open('%s', O_DIRECTORY|O_RDONLY|O_CLOEXEC)", hfuzz->io.inputDir);
         return false;
@@ -293,9 +295,8 @@ bool input_parseBlacklist(honggfuzz_t* hfuzz) {
         if (hfuzz->feedback.blacklistCnt > 1) {
             if (hfuzz->feedback.blacklist[hfuzz->feedback.blacklistCnt - 1] >
                 hfuzz->feedback.blacklist[hfuzz->feedback.blacklistCnt]) {
-                LOG_F(
-                    "Blacklist file not sorted. Use 'tools/createStackBlacklist.sh' to sort "
-                    "records");
+                LOG_F("Blacklist file not sorted. Use 'tools/createStackBlacklist.sh' to sort "
+                      "records");
                 return false;
             }
         }
@@ -310,7 +311,7 @@ bool input_parseBlacklist(honggfuzz_t* hfuzz) {
     return true;
 }
 
-bool input_prepareDynamicInput(run_t* run) {
+bool input_prepareDynamicInput(run_t* run, bool need_mangele) {
     {
         MX_SCOPED_RWLOCK_READ(&run->global->io.dynfileq_mutex);
 
@@ -331,18 +332,19 @@ bool input_prepareDynamicInput(run_t* run) {
 
     input_setSize(run, run->dynfileqCurrent->size);
     memcpy(run->dynamicFile, run->dynfileqCurrent->data, run->dynfileqCurrent->size);
-    mangle_mangleContent(run);
+    if (need_mangele) mangle_mangleContent(run);
 
     return true;
 }
 
-bool input_prepareStaticFile(run_t* run, bool rewind) {
+bool input_prepareStaticFile(run_t* run, bool rewind, bool need_mangele) {
     char fname[PATH_MAX];
     if (!input_getNext(run, fname, /* rewind= */ rewind)) {
         return false;
     }
     snprintf(run->origFileName, sizeof(run->origFileName), "%s", fname);
 
+    input_setSize(run, run->global->mutate.maxFileSz);
     ssize_t fileSz = files_readFileToBufMax(fname, run->dynamicFile, run->global->mutate.maxFileSz);
     if (fileSz < 0) {
         LOG_E("Couldn't read contents of '%s'", fname);
@@ -350,7 +352,7 @@ bool input_prepareStaticFile(run_t* run, bool rewind) {
     }
 
     input_setSize(run, fileSz);
-    mangle_mangleContent(run);
+    if (need_mangele) mangle_mangleContent(run);
 
     return true;
 }
@@ -377,6 +379,7 @@ bool input_prepareExternalFile(run_t* run) {
     }
     LOG_D("Subporcess '%s' finished with success", run->global->exe.externalCommand);
 
+    input_setSize(run, run->global->mutate.maxFileSz);
     ssize_t sz = files_readFromFdSeek(fd, run->dynamicFile, run->global->mutate.maxFileSz, 0);
     if (sz == -1) {
         LOG_E("Couldn't read file from fd=%d", fd);
@@ -408,6 +411,39 @@ bool input_postProcessFile(run_t* run) {
     }
     LOG_D("Subporcess '%s' finished with success", run->global->exe.externalCommand);
 
+    input_setSize(run, run->global->mutate.maxFileSz);
+    ssize_t sz = files_readFromFdSeek(fd, run->dynamicFile, run->global->mutate.maxFileSz, 0);
+    if (sz == -1) {
+        LOG_E("Couldn't read file from fd=%d", fd);
+        return false;
+    }
+
+    input_setSize(run, (size_t)sz);
+    return true;
+}
+
+bool input_feedbackMutateFile(run_t* run) {
+    int fd =
+        files_writeBufToTmpFile(run->global->io.workDir, run->dynamicFile, run->dynamicFileSz, 0);
+    if (fd == -1) {
+        LOG_E("Couldn't write input file to a temporary buffer");
+        return false;
+    }
+    defer {
+        close(fd);
+    };
+
+    char fname[PATH_MAX];
+    snprintf(fname, sizeof(fname), "/dev/fd/%d", fd);
+
+    const char* const argv[] = {run->global->exe.feedbackMutateCommand, fname, NULL};
+    if (subproc_System(run, argv) != 0) {
+        LOG_E("Subprocess '%s' returned abnormally", run->global->exe.feedbackMutateCommand);
+        return false;
+    }
+    LOG_D("Subporcess '%s' finished with success", run->global->exe.externalCommand);
+
+    input_setSize(run, run->global->mutate.maxFileSz);
     ssize_t sz = files_readFromFdSeek(fd, run->dynamicFile, run->global->mutate.maxFileSz, 0);
     if (sz == -1) {
         LOG_E("Couldn't read file from fd=%d", fd);

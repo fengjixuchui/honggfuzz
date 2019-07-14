@@ -24,20 +24,25 @@ static bool isCXX = false;
 static bool isGCC = false;
 
 /* Embed libhfuzz.a inside this binary */
-__asm__(
-    "\n"
-    "   .global lhfuzz_start\n"
-    "   .global lhfuzz_end\n"
-    "lhfuzz_start:\n"
-    "   .incbin \"libhfuzz/libhfuzz.a\"\n"
-    "lhfuzz_end:\n"
-    "\n"
-    "   .global lhfnetdriver_start\n"
-    "   .global lhfnetdriver_end\n"
-    "lhfnetdriver_start:\n"
-    "   .incbin \"libhfnetdriver/libhfnetdriver.a\"\n"
-    "lhfnetdriver_end:\n"
-    "\n");
+__asm__("\n"
+        "   .global lhfuzz_start\n"
+        "   .global lhfuzz_end\n"
+        "lhfuzz_start:\n"
+        "   .incbin \"libhfuzz/libhfuzz.a\"\n"
+        "lhfuzz_end:\n"
+        "\n"
+        "   .global lhfnetdriver_start\n"
+        "   .global lhfnetdriver_end\n"
+        "lhfnetdriver_start:\n"
+        "   .incbin \"libhfnetdriver/libhfnetdriver.a\"\n"
+        "lhfnetdriver_end:\n"
+        "\n"
+        "   .global lhfcommon_start\n"
+        "   .global lhfcommon_end\n"
+        "lhfcommon_start:\n"
+        "   .incbin \"libhfcommon/libhfcommon.a\"\n"
+        "lhfcommon_end:\n"
+        "\n");
 
 static const char* _basename(const char* path) {
     static __thread char fname[PATH_MAX];
@@ -74,8 +79,8 @@ static bool useM32() {
     return false;
 }
 
-static bool useGccGE8() {
-    if (getenv("HFUZZ_CC_USE_GCC_GE_8")) {
+static bool useBelowGCC8() {
+    if (getenv("HFUZZ_CC_USE_GCC_BELOW_8")) {
         return true;
     }
     return false;
@@ -84,6 +89,9 @@ static bool useGccGE8() {
 static bool isLDMode(int argc, char** argv) {
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--version") == 0) {
+            return false;
+        }
+        if (strcmp(argv[i], "--target-help") == 0) {
             return false;
         }
         if (strcmp(argv[i], "-c") == 0) {
@@ -100,6 +108,15 @@ static bool isLDMode(int argc, char** argv) {
         }
     }
     return true;
+}
+
+static bool isFSanitizeFuzzer(int argc, char** argv) {
+    for (int i = 1; i < argc; i++) {
+        if (util_strStartsWith(argv[i], "-fsanitize=") && strstr(argv[i], "fuzzer")) {
+            return true;
+        }
+    }
+    return false;
 }
 
 static int hf_execvp(const char* file, char** argv) {
@@ -159,8 +176,6 @@ static int execCC(int argc, char** argv) {
             hf_execvp("clang++-6", argv);
             hf_execvp("clang++-5.0", argv);
             hf_execvp("clang++-5", argv);
-            hf_execvp("clang++-4.0", argv);
-            hf_execvp("clang++-4", argv);
             hf_execvp("clang", argv);
         } else {
             /* Try the default one, then newest ones (hopefully) first */
@@ -178,8 +193,6 @@ static int execCC(int argc, char** argv) {
             hf_execvp("clang-6", argv);
             hf_execvp("clang-5.0", argv);
             hf_execvp("clang-5", argv);
-            hf_execvp("clang-4.0", argv);
-            hf_execvp("clang-4", argv);
         }
     }
 
@@ -243,7 +256,7 @@ static bool getLibPath(
     return true;
 }
 
-static char* getLibHfuzzPath() {
+static char* getLibHFuzzPath() {
     extern uint8_t lhfuzz_start __asm__("lhfuzz_start");
     extern uint8_t lhfuzz_end __asm__("lhfuzz_end");
 
@@ -272,21 +285,33 @@ static char* getLibHFNetDriverPath() {
     return path;
 }
 
+static char* getLibHFCommonPath() {
+    extern uint8_t lhfcommon_start __asm__("lhfcommon_start");
+    extern uint8_t lhfcommon_end __asm__("lhfcommon_end");
+
+    static char path[PATH_MAX] = {};
+    if (path[0]) {
+        return path;
+    }
+    if (!getLibPath("libhfuzz", "HFUZZ_LHFCOMMON_PATH", &lhfcommon_start, &lhfcommon_end, path)) {
+        LOG_F("Couldn't create the temporary libhcommon.a");
+    }
+    return path;
+}
+
 static void commonOpts(int* j, char** args) {
     args[(*j)++] = getIncPaths();
     if (isGCC) {
-        if (useGccGE8()) {
-            /* gcc-8 offers trace-cmp as well, but it's not that widely used yet */
+        if (useBelowGCC8()) {
+            /* trace-pc is the best that gcc-6/7 currently offers */
             args[(*j)++] = "-fsanitize-coverage=trace-pc,trace-cmp";
         } else {
-            /* trace-pc is the best that gcc-6/7 currently offers */
+            /* gcc-8+ offers trace-cmp as well, but it's not that widely used yet */
             args[(*j)++] = "-fsanitize-coverage=trace-pc";
         }
     } else {
         args[(*j)++] = "-Wno-unused-command-line-argument";
         args[(*j)++] = "-fsanitize-coverage=trace-pc-guard,trace-cmp,trace-div,indirect-calls";
-        args[(*j)++] = "-mllvm";
-        args[(*j)++] = "-sanitizer-coverage-prune-blocks=0";
         args[(*j)++] = "-mllvm";
         args[(*j)++] = "-sanitizer-coverage-level=3";
     }
@@ -301,18 +326,16 @@ static void commonOpts(int* j, char** args) {
     args[(*j)++] = "-D__NO_STRING_INLINES";
 
     /* Make it possible to use the libhfnetdriver */
-    args[(*j)++] =
-        "-DHFND_FUZZING_ENTRY_FUNCTION_CXX(x,y)="
-        "extern \"C\" int HonggfuzzNetDriver_main(x,y);"
-        "extern const char* LIBHFNETDRIVER_module_netdriver;"
-        "const char** LIBHFNETDRIVER_module_main = &LIBHFNETDRIVER_module_netdriver;"
-        "int HonggfuzzNetDriver_main(x,y)";
-    args[(*j)++] =
-        "-DHFND_FUZZING_ENTRY_FUNCTION(x,y)="
-        "int HonggfuzzNetDriver_main(x,y);"
-        "extern const char* LIBHFNETDRIVER_module_netdriver;"
-        "const char** LIBHFNETDRIVER_module_main = &LIBHFNETDRIVER_module_netdriver;"
-        "int HonggfuzzNetDriver_main(x,y)";
+    args[(*j)++] = "-DHFND_FUZZING_ENTRY_FUNCTION_CXX(x,y)="
+                   "extern const char* LIBHFNETDRIVER_module_netdriver;"
+                   "const char** LIBHFNETDRIVER_tmp1 = &LIBHFNETDRIVER_module_netdriver;"
+                   "extern \"C\" int HonggfuzzNetDriver_main(x,y);"
+                   "int HonggfuzzNetDriver_main(x,y)";
+    args[(*j)++] = "-DHFND_FUZZING_ENTRY_FUNCTION(x,y)="
+                   "extern const char* LIBHFNETDRIVER_module_netdriver;"
+                   "const char** LIBHFNETDRIVER_tmp1 = &LIBHFNETDRIVER_module_netdriver;"
+                   "int HonggfuzzNetDriver_main(x,y);"
+                   "int HonggfuzzNetDriver_main(x,y)";
 
     if (useM32()) {
         args[(*j)++] = "-m32";
@@ -333,6 +356,11 @@ static int ccMode(int argc, char** argv) {
 
     for (int i = 1; i < argc; i++) {
         args[j++] = argv[i];
+    }
+
+    /* Disable -fsanitize=fuzzer */
+    if (isFSanitizeFuzzer(argc, argv)) {
+        args[j++] = "-fno-sanitize=fuzzer";
     }
 
     return execCC(j, args);
@@ -362,6 +390,7 @@ static int ldMode(int argc, char** argv) {
     args[j++] = "-Wl,--wrap=memcmp";
     args[j++] = "-Wl,--wrap=bcmp";
     args[j++] = "-Wl,--wrap=memmem";
+    args[j++] = "-Wl,--wrap=strcpy";
     /* Apache's httpd mem/str cmp functions */
     args[j++] = "-Wl,--wrap=ap_cstr_casecmp";
     args[j++] = "-Wl,--wrap=ap_cstr_casecmpn";
@@ -373,6 +402,7 @@ static int ldMode(int argc, char** argv) {
     args[j++] = "-Wl,--wrap=OPENSSL_memcmp";
     args[j++] = "-Wl,--wrap=OPENSSL_strcasecmp";
     args[j++] = "-Wl,--wrap=OPENSSL_strncasecmp";
+    args[j++] = "-Wl,--wrap=memcmpct";
     /* Frequently used libXML2 functions */
     args[j++] = "-Wl,--wrap=xmlStrncmp";
     args[j++] = "-Wl,--wrap=xmlStrcmp";
@@ -386,27 +416,33 @@ static int ldMode(int argc, char** argv) {
     args[j++] = "-Wl,--wrap=strcsequal";
 #endif /* _HF_ARCH_DARWIN */
 
+    /* Pull modules defining the following symbols (if they exist) */
+#ifdef _HF_ARCH_DARWIN
+    args[j++] = "-Wl,-U,_HonggfuzzNetDriver_main";
+    args[j++] = "-Wl,-U,_LIBHFUZZ_module_instrument";
+    args[j++] = "-Wl,-U,_LIBHFUZZ_module_memorycmp";
+#else  /* _HF_ARCH_DARWIN */
+    args[j++] = "-Wl,-u,HonggfuzzNetDriver_main";
+    args[j++] = "-Wl,-u,LIBHFUZZ_module_instrument";
+    args[j++] = "-Wl,-u,LIBHFUZZ_module_memorycmp";
+#endif /* _HF_ARCH_DARWIN */
+
     for (int i = 1; i < argc; i++) {
         args[j++] = argv[i];
     }
 
     /* Reference standard honggfuzz libraries (libhfuzz and libhfnetdriver) */
     args[j++] = getLibHFNetDriverPath();
-    args[j++] = getLibHfuzzPath();
-    args[j++] = getLibHFNetDriverPath();
-
-    /* Pull modules defining the following symbols (if they exist) */
-#ifndef _HF_ARCH_DARWIN
-    args[j++] = "-Wl,-u,LIBHFNETDRIVER_module_main",
-    args[j++] = "-Wl,-u,LIBHFUZZ_module_instrument";
-    args[j++] = "-Wl,-u,LIBHFUZZ_module_memorycmp";
-#else  /* _HF_ARCH_DARWIN */
-    args[j++] = "-Wl,-u,_LIBHFUZZ_module_instrument";
-    args[j++] = "-Wl,-u,_LIBHFUZZ_module_memorycmp";
-#endif /* _HF_ARCH_DARWIN */
+    args[j++] = getLibHFuzzPath();
+    args[j++] = getLibHFCommonPath();
 
     /* Needed by the libhfcommon */
     args[j++] = "-pthread";
+
+    /* Disable -fsanitize=fuzzer */
+    if (isFSanitizeFuzzer(argc, argv)) {
+        args[j++] = "-fno-sanitize=fuzzer";
+    }
 
     return execCC(j, args);
 }

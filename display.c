@@ -64,11 +64,11 @@ __attribute__((format(printf, 1, 2))) static void display_put(const char* fmt, .
 
 static void display_printKMG(uint64_t val) {
     if (val >= 1000000000UL) {
-        display_put(" [%.2lfG]", (double)val / 1000000000.0);
+        display_put(" [%.02LfG]", (long double)val / 1000000000.0L);
     } else if (val >= 1000000UL) {
-        display_put(" [%.2lfM]", (double)val / 1000000.0);
+        display_put(" [%.02LfM]", (long double)val / 1000000.0L);
     } else if (val >= 1000UL) {
-        display_put(" [%.2lfk]", (double)val / 1000.0);
+        display_put(" [%.02Lfk]", (long double)val / 1000.0L);
     }
 }
 
@@ -102,8 +102,12 @@ static unsigned getCpuUse(int numCpus) {
     prevSystemT = systemT;
     prevIdleT = idleT;
 
-    return ((userCycles + niceCycles + systemCycles) * numCpus * 100) /
-           (userCycles + niceCycles + systemCycles + idleCycles);
+    uint64_t allCycles = userCycles + niceCycles + systemCycles + idleCycles;
+    if (allCycles == 0) {
+        return 0;
+    }
+
+    return ((userCycles + niceCycles + systemCycles) * numCpus * 100) / (allCycles);
 }
 
 static void getDuration(time_t elapsed_second, char* buf, size_t bufSz) {
@@ -147,9 +151,9 @@ static void display_displayLocked(honggfuzz_t* hfuzz) {
     if (hfuzz->mutate.mutationsMax > 0 && curr_exec_cnt > hfuzz->mutate.mutationsMax) {
         curr_exec_cnt = hfuzz->mutate.mutationsMax;
     }
-    float exeProgress = 0.0f;
+    int exeProgress = 0;
     if (hfuzz->mutate.mutationsMax > 0) {
-        exeProgress = ((float)curr_exec_cnt * 100 / hfuzz->mutate.mutationsMax);
+        exeProgress = (curr_exec_cnt * 100) / hfuzz->mutate.mutationsMax;
     }
 
     static size_t prev_exec_cnt = 0UL;
@@ -163,7 +167,7 @@ static void display_displayLocked(honggfuzz_t* hfuzz) {
     display_put("  Iterations : " ESC_BOLD "%" _HF_NONMON_SEP "zu" ESC_RESET, curr_exec_cnt);
     display_printKMG(curr_exec_cnt);
     if (hfuzz->mutate.mutationsMax) {
-        display_put(" (out of: " ESC_BOLD "%" _HF_NONMON_SEP "zu" ESC_RESET " [%.2f%%])",
+        display_put(" (out of: " ESC_BOLD "%" _HF_NONMON_SEP "zu" ESC_RESET " [%d%%])",
             hfuzz->mutate.mutationsMax, exeProgress);
     }
     switch (ATOMIC_GET(hfuzz->feedback.state)) {
@@ -171,34 +175,27 @@ static void display_displayLocked(honggfuzz_t* hfuzz) {
             display_put("\n        Mode : " ESC_BOLD "Static" ESC_RESET "\n");
             break;
         case _HF_STATE_DYNAMIC_DRY_RUN:
-            display_put("\n  Mode [1/2] : " ESC_BOLD "Feedback Driven Dry Run" ESC_RESET "\n");
+            display_put("\n  Mode [1/3] : " ESC_BOLD "Feedback Driven Dry Run" ESC_RESET "\n");
+            break;
+        case _HF_STATE_DYNAMIC_SWITCH_TO_MAIN:
+            display_put("\n  Mode [2/3] : " ESC_BOLD
+                        "Switching to the Feedback Driven Mode" ESC_RESET "\n");
             break;
         case _HF_STATE_DYNAMIC_MAIN:
-            display_put("\n  Mode [2/2] : " ESC_BOLD "Feedback Driven Mode" ESC_RESET "\n");
+            display_put("\n  Mode [3/3] : " ESC_BOLD "Feedback Driven Mode" ESC_RESET "\n");
             break;
         default:
             display_put("\n        Mode : " ESC_BOLD "Unknown" ESC_RESET "\n");
             break;
     }
-
-#if defined(_HF_ARCH_LINUX)
-    if (hfuzz->linux.pid > 0) {
-        display_put("      Target : [" ESC_BOLD "%d" ESC_RESET "] '" ESC_BOLD "%s" ESC_RESET "'\n",
-            hfuzz->linux.pid, hfuzz->linux.pidCmd);
-#elif defined(_HF_ARCH_NETBSD)
-    if (hfuzz->netbsd.pid > 0) {
-        display_put("      Target : [" ESC_BOLD "%d" ESC_RESET "] '" ESC_BOLD "%s" ESC_RESET "'\n",
-            hfuzz->netbsd.pid, hfuzz->netbsd.pidCmd);
-#else
-    if (false) {
-#endif
-    } else {
-        display_put("      Target : " ESC_BOLD "%s" ESC_RESET "\n", hfuzz->display.cmdline_txt);
-    }
+    display_put("      Target : " ESC_BOLD "%s" ESC_RESET "\n", hfuzz->display.cmdline_txt);
 
     static long num_cpu = 0;
     if (num_cpu == 0) {
         num_cpu = sysconf(_SC_NPROCESSORS_ONLN);
+    }
+    if (num_cpu <= 0) {
+        num_cpu = 1;
     }
     unsigned cpuUse = getCpuUse(num_cpu);
     display_put("     Threads : " ESC_BOLD "%zu" ESC_RESET ", CPUs: " ESC_BOLD "%ld" ESC_RESET
@@ -212,8 +209,7 @@ static void display_displayLocked(honggfuzz_t* hfuzz) {
 
     uint64_t crashesCnt = ATOMIC_GET(hfuzz->cnts.crashesCnt);
     /* colored the crash count as red when exist crash */
-    display_put("     Crashes : " ESC_BOLD
-                "%s"
+    display_put("     Crashes : " ESC_BOLD "%s"
                 "%zu" ESC_RESET " [unique: %s" ESC_BOLD "%zu" ESC_RESET ", blacklist: " ESC_BOLD
                 "%zu" ESC_RESET ", verified: " ESC_BOLD "%zu" ESC_RESET "]\n",
         crashesCnt > 0 ? ESC_RED : "", hfuzz->cnts.crashesCnt, crashesCnt > 0 ? ESC_RED : "",

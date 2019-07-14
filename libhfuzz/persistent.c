@@ -1,5 +1,3 @@
-#include "libhfuzz/libhfuzz.h"
-
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
@@ -19,10 +17,9 @@
 #include "libhfcommon/common.h"
 #include "libhfcommon/files.h"
 #include "libhfcommon/log.h"
+#include "libhfuzz/fetch.h"
 #include "libhfuzz/instrument.h"
-
-__attribute__((visibility("default"))) __attribute__((used))
-const char* const LIBHFUZZ_module_persistent = "LIBHFUZZ_module_persistent";
+#include "libhfuzz/libhfuzz.h"
 
 __attribute__((weak)) int LLVMFuzzerInitialize(
     int* argc HF_ATTR_UNUSED, char*** argv HF_ATTR_UNUSED) {
@@ -37,9 +34,8 @@ __attribute__((weak)) size_t LLVMFuzzerMutate(
 
 __attribute__((weak)) int LLVMFuzzerTestOneInput(
     const uint8_t* buf HF_ATTR_UNUSED, size_t len HF_ATTR_UNUSED) {
-    LOG_F(
-        "Define 'int LLVMFuzzerTestOneInput(uint8_t * buf, size_t len)' in your "
-        "code to make it work");
+    LOG_F("Define 'int LLVMFuzzerTestOneInput(uint8_t * buf, size_t len)' in your "
+          "code to make it work");
     return 0;
 }
 
@@ -53,35 +49,6 @@ __attribute__((constructor)) static void initializePersistent(void) {
         PLOG_F("mmap(fd=%d, size=%zu) of the input file failed", _HF_INPUT_FD,
             (size_t)_HF_INPUT_MAX_SIZE);
     }
-}
-
-void HonggfuzzFetchData(const uint8_t** buf_ptr, size_t* len_ptr) {
-    static bool initialized = false;
-    if (initialized) {
-        if (!files_writeToFd(_HF_PERSISTENT_FD, &HFdoneTag, sizeof(HFdoneTag))) {
-            LOG_F("writeToFd(size=%zu, doneTag) failed", sizeof(HFdoneTag));
-        }
-    } else {
-        /*
-         * Start coverage feedback from this point only (ignore coverage obtained during process
-         * start-up)
-         */
-        instrumentClearNewCov();
-        initialized = true;
-    }
-
-    uint64_t rcvLen;
-    ssize_t sz = files_readFromFd(_HF_PERSISTENT_FD, (uint8_t*)&rcvLen, sizeof(rcvLen));
-    if (sz == -1) {
-        PLOG_F("readFromFd(fd=%d, size=%zu) failed", _HF_PERSISTENT_FD, sizeof(rcvLen));
-    }
-    if (sz != sizeof(rcvLen)) {
-        LOG_F("readFromFd(fd=%d, size=%zu) failed, received=%zd bytes", _HF_PERSISTENT_FD,
-            sizeof(rcvLen), sz);
-    }
-
-    *buf_ptr = inputFile;
-    *len_ptr = (size_t)rcvLen;
 }
 
 void HF_ITER(const uint8_t** buf_ptr, size_t* len_ptr) {
@@ -135,10 +102,23 @@ static int HonggfuzzRunFromFile(int argc, char** argv) {
 
 int HonggfuzzMain(int argc, char** argv) {
     LLVMFuzzerInitialize(&argc, &argv);
+    instrumentClearNewCov();
 
-    if (inputFile) {
-        HonggfuzzPersistentLoop();
+    if (!fetchIsInputAvailable()) {
+        return HonggfuzzRunFromFile(argc, argv);
     }
 
-    return HonggfuzzRunFromFile(argc, argv);
+    HonggfuzzPersistentLoop();
+    return 0;
+}
+
+/*
+ * Declare it 'weak', so it can be safely linked with regular binaries which
+ * implement their own main()
+ */
+#if !defined(__CYGWIN__)
+__attribute__((weak))
+#endif /* !defined(__CYGWIN__) */
+int main(int argc, char** argv) {
+    return HonggfuzzMain(argc, argv);
 }

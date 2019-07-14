@@ -24,6 +24,8 @@
 #ifndef _HF_SUBPROC_H_
 #define _HF_SUBPROC_H_
 
+#include <pthread.h>
+
 #include "honggfuzz.h"
 
 /* Missing WIFCONTINUED in Android */
@@ -35,12 +37,15 @@ extern const char* subproc_StatusToStr(int status, char* str, size_t len);
 
 extern bool subproc_Run(run_t* run);
 
-extern bool subproc_persistentModeRoundDone(run_t* run);
+extern bool subproc_persistentModeStateMachine(run_t* run);
 
 extern uint8_t subproc_System(run_t* run, const char* const argv[]);
 
 extern void subproc_checkTimeLimit(run_t* run);
 
 extern void subproc_checkTermination(run_t* run);
+
+bool subproc_runThread(
+    honggfuzz_t* hfuzz, pthread_t* thread, void* (*thread_func)(void*), bool joinable);
 
 #endif

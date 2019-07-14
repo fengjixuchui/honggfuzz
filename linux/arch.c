@@ -57,28 +57,13 @@
 #include "sanitizers.h"
 #include "subproc.h"
 
-static inline bool arch_shouldAttach(run_t* run) {
-    if (run->global->exe.persistent && run->linux.attachedPid == run->pid) {
-        return false;
-    }
-    if (run->global->linux.pid > 0 && run->linux.attachedPid == run->global->linux.pid) {
-        return false;
-    }
-    if (run->global->socketFuzzer.enabled && run->linux.attachedPid == run->pid) {
-        return false;
-    }
-    return true;
-}
-
-static uint8_t arch_clone_stack[128 * 1024];
+static uint8_t arch_clone_stack[128 * 1024] __attribute__((aligned(__BIGGEST_ALIGNMENT__)));
 static __thread jmp_buf env;
 
 HF_ATTR_NO_SANITIZE_ADDRESS
 HF_ATTR_NO_SANITIZE_MEMORY
-static int arch_cloneFunc(void* arg HF_ATTR_UNUSED) {
+__attribute__((noreturn)) static int arch_cloneFunc(void* arg HF_ATTR_UNUSED) {
     longjmp(env, 1);
-    abort();
-    return 0;
 }
 
 /* Avoid problem with caching of PID/TID in glibc */
@@ -193,6 +178,15 @@ bool arch_launchChild(run_t* run) {
     return false;
 }
 
+static bool arch_attachToNewPid(run_t* run) {
+    if (!arch_traceAttach(run)) {
+        LOG_W("arch_traceAttach(pid=%d) failed", run->pid);
+        return false;
+    }
+
+    return true;
+}
+
 void arch_prepareParentAfterFork(run_t* run) {
     /* Parent */
     if (run->global->exe.persistent) {
@@ -210,76 +204,23 @@ void arch_prepareParentAfterFork(run_t* run) {
             PLOG_F("fcntl(%d, F_SETFL, O_ASYNC)", run->persistentSock);
         }
     }
-}
-
-static bool arch_attachToNewPid(run_t* run, pid_t pid) {
-    if (!arch_shouldAttach(run)) {
-        return true;
-    }
-    run->linux.attachedPid = pid;
-    if (!arch_traceAttach(run, pid)) {
-        LOG_W("arch_traceAttach(pid=%d) failed", pid);
-        kill(pid, SIGKILL);
-        return false;
-    }
 
     arch_perfClose(run);
-    if (arch_perfOpen(pid, run) == false) {
-        kill(pid, SIGKILL);
-        return false;
+    if (!arch_perfOpen(run)) {
+        LOG_F("Couldn't open perf event for pid=%d", (int)run->pid);
     }
-
-    return true;
+    if (!arch_attachToNewPid(run)) {
+        LOG_F("Couldn't attach to pid=%d", (int)run->pid);
+    }
 }
 
 void arch_prepareParent(run_t* run) {
-    pid_t ptracePid = (run->global->linux.pid > 0) ? run->global->linux.pid : run->pid;
-    pid_t childPid = run->pid;
-
-    if (!arch_attachToNewPid(run, ptracePid)) {
-        LOG_E("Couldn't attach to PID=%d", (int)ptracePid);
-    }
-
-    /* A long-lived process could have already exited, and we wouldn't know */
-    if (childPid != ptracePid && kill(ptracePid, 0) == -1) {
-        if (run->global->linux.pidFile) {
-            /* If pid from file, check again for cases of auto-restart daemons that update it */
-            /*
-             * TODO: Investigate if we need to delay here, so that target process has
-             * enough time to restart. Tricky to answer since is target dependent.
-             */
-            if (files_readPidFromFile(run->global->linux.pidFile, &run->global->linux.pid) ==
-                false) {
-                LOG_F("Failed to read new PID from file - abort");
-            } else {
-                if (kill(run->global->linux.pid, 0) == -1) {
-                    PLOG_F("Liveness of PID %d read from file questioned - abort",
-                        run->global->linux.pid);
-                } else {
-                    LOG_D("Monitor PID has been updated (pid=%d)", run->global->linux.pid);
-                    ptracePid = run->global->linux.pid;
-                }
-            }
-        }
-    }
-
-    if (arch_perfEnable(run) == false) {
-        LOG_E("Couldn't enable perf counters for pid %d", ptracePid);
-    }
-    if (childPid != ptracePid) {
-        if (arch_traceWaitForPidStop(childPid) == false) {
-            LOG_F("PID: %d not in a stopped state", childPid);
-        }
-        if (kill(childPid, SIGCONT) == -1) {
-            PLOG_F("Restarting PID: %d failed", childPid);
-        }
+    if (!arch_perfEnable(run)) {
+        LOG_F("Couldn't enable perf counters for pid=%d", (int)run->pid);
     }
 }
 
 static bool arch_checkWait(run_t* run) {
-    pid_t ptracePid = (run->global->linux.pid > 0) ? run->global->linux.pid : run->pid;
-    pid_t childPid = run->pid;
-
     /* All queued wait events must be tested when SIGCHLD was delivered */
     for (;;) {
         int status;
@@ -296,54 +237,44 @@ static bool arch_checkWait(run_t* run) {
         }
 
         char statusStr[4096];
-        LOG_D("PID '%d' returned with status: %s", pid,
+        LOG_D("pid=%d returned with status: %s", pid,
             subproc_StatusToStr(status, statusStr, sizeof(statusStr)));
 
-        if (run->global->exe.persistent && pid == run->persistentPid &&
-            (WIFEXITED(status) || WIFSIGNALED(status))) {
-            arch_traceAnalyze(run, status, pid);
-            run->persistentPid = 0;
-            if (fuzz_isTerminating() == false) {
-                LOG_W("Persistent mode: PID %d exited with status: %s", pid,
-                    subproc_StatusToStr(status, statusStr, sizeof(statusStr)));
+        arch_traceAnalyze(run, status, pid);
+
+        if (pid == run->pid && (WIFEXITED(status) || WIFSIGNALED(status))) {
+            if (run->global->exe.persistent) {
+                if (!fuzz_isTerminating()) {
+                    LOG_W("Persistent mode: pid=%d exited with status: %s", (int)run->pid,
+                        subproc_StatusToStr(status, statusStr, sizeof(statusStr)));
+                }
             }
             return true;
         }
-        if (ptracePid == childPid) {
-            arch_traceAnalyze(run, status, pid);
-            continue;
-        }
-        if (pid == childPid && (WIFEXITED(status) || WIFSIGNALED(status))) {
-            return true;
-        }
-        if (pid == childPid) {
-            continue;
-        }
-
-        arch_traceAnalyze(run, status, pid);
     }
 }
 
 void arch_reapChild(run_t* run) {
     for (;;) {
-        static const struct timespec ts = {
-            .tv_sec = 0L,
-            .tv_nsec = 250000000L,
-        };
-        int sig = sigtimedwait(&run->global->linux.waitSigSet, NULL, &ts);
-        if (sig == -1 && (errno != EAGAIN && errno != EINTR)) {
-            PLOG_F("sigtimedwait(SIGIO|SIGCHLD, 0.25s)");
-        }
-        if (sig == -1) {
-            subproc_checkTimeLimit(run);
-            subproc_checkTermination(run);
-        }
-        if (subproc_persistentModeRoundDone(run)) {
+        if (subproc_persistentModeStateMachine(run)) {
             break;
         }
+
+        subproc_checkTimeLimit(run);
+        subproc_checkTermination(run);
+
+        const struct timespec ts = {
+            .tv_sec = 0ULL,
+            .tv_nsec = (1000ULL * 1000ULL * 250ULL),
+        };
+        /* Return with SIGIO, SIGCHLD and with SIGUSR1 */
+        int sig = sigtimedwait(&run->global->exe.waitSigSet, NULL, &ts /* 0.25s */);
+        if (sig == -1 && (errno != EAGAIN && errno != EINTR)) {
+            PLOG_F("sigwaitinfo(SIGIO|SIGCHLD|SIGUSR1)");
+        }
+
         if (arch_checkWait(run)) {
-            LOG_D("SocketFuzzer: arch: Crash Identified");
-            run->hasCrashed = true;
+            run->pid = 0;
             break;
         }
         if (run->global->socketFuzzer.enabled) {
@@ -351,12 +282,10 @@ void arch_reapChild(run_t* run) {
             break;
         }
     }
-
     if (run->global->sanitizer.enable) {
-        pid_t ptracePid = (run->global->linux.pid > 0) ? run->global->linux.pid : run->pid;
         char crashReport[PATH_MAX];
         snprintf(crashReport, sizeof(crashReport), "%s/%s.%d", run->global->io.workDir, kLOGPREFIX,
-            ptracePid);
+            run->pid);
         if (files_exists(crashReport)) {
             if (run->backtrace) {
                 unlink(crashReport);
@@ -364,7 +293,7 @@ void arch_reapChild(run_t* run) {
                 LOG_W("Un-handled ASan report due to compiler-rt internal error - retry with '%s'",
                     crashReport);
                 /* Try to parse report file */
-                arch_traceExitAnalyze(run, ptracePid);
+                arch_traceExitAnalyze(run, run->pid);
             }
         }
     }
@@ -386,15 +315,6 @@ bool arch_archInit(honggfuzz_t* hfuzz) {
         return false;
     }
 
-    /*
-     * Set the bitmask (once) of interesting signals, that this thread will be waiting for
-     * (with sigsuspend). Do it once here, to save precious CPU cycles, as this cannot be
-     * a statically initialized const variable
-     */
-    sigemptyset(&hfuzz->linux.waitSigSet);
-    sigaddset(&hfuzz->linux.waitSigSet, SIGIO);
-    sigaddset(&hfuzz->linux.waitSigSet, SIGCHLD);
-
     for (;;) {
         __attribute__((weak)) const char* gnu_get_libc_version(void);
         if (!gnu_get_libc_version) {
@@ -408,11 +328,10 @@ bool arch_archInit(honggfuzz_t* hfuzz) {
             break;
         }
         if ((major < 2) || (major == 2 && minor < 23)) {
-            LOG_W(
-                "Your glibc version:'%s' will most likely result in malloc()-related "
-                "deadlocks. Min. version 2.24 (Or, Ubuntu's 2.23-0ubuntu6) suggested. "
-                "See https://sourceware.org/bugzilla/show_bug.cgi?id=19431 for explanation. "
-                "Using clone() instead of fork()",
+            LOG_W("Your glibc version:'%s' will most likely result in malloc()-related "
+                  "deadlocks. Min. version 2.24 (Or, Ubuntu's 2.23-0ubuntu6) suggested. "
+                  "See https://sourceware.org/bugzilla/show_bug.cgi?id=19431 for explanation. "
+                  "Using clone() instead of fork()",
                 gversion);
             break;
         }
@@ -465,7 +384,7 @@ bool arch_archInit(honggfuzz_t* hfuzz) {
             return false;
         }
 
-        if (arch_perfInit(hfuzz) == false) {
+        if (!arch_perfInit(hfuzz)) {
             return false;
         }
     }
@@ -481,35 +400,6 @@ bool arch_archInit(honggfuzz_t* hfuzz) {
         return false;
     }
 #endif
-
-    /* If read PID from file enable - read current value */
-    if (hfuzz->linux.pidFile) {
-        if (files_readPidFromFile(hfuzz->linux.pidFile, &hfuzz->linux.pid) == false) {
-            LOG_E("Failed to read PID from file");
-            return false;
-        }
-    }
-
-    /* If remote pid, resolve command using procfs */
-    if (hfuzz->linux.pid > 0) {
-        char procCmd[PATH_MAX] = {0};
-        snprintf(procCmd, sizeof(procCmd), "/proc/%d/cmdline", hfuzz->linux.pid);
-
-        ssize_t sz = files_readFileToBufMax(
-            procCmd, (uint8_t*)hfuzz->linux.pidCmd, sizeof(hfuzz->linux.pidCmd) - 1);
-        if (sz < 1) {
-            LOG_E("Couldn't read '%s'", procCmd);
-            return false;
-        }
-
-        /* Make human readable */
-        for (size_t i = 0; i < ((size_t)sz - 1); i++) {
-            if (hfuzz->linux.pidCmd[i] == '\0') {
-                hfuzz->linux.pidCmd[i] = ' ';
-            }
-        }
-        hfuzz->linux.pidCmd[sz] = '\0';
-    }
 
     /* Updates the important signal array based on input args */
     arch_traceSignalsInit(hfuzz);
@@ -537,6 +427,18 @@ bool arch_archThreadInit(run_t* run) {
     run->linux.cpuInstrFd = -1;
     run->linux.cpuBranchFd = -1;
     run->linux.cpuIptBtsFd = -1;
+
+    if (prctl(PR_SET_CHILD_SUBREAPER, 1UL, 0UL, 0UL, 0UL) == -1) {
+        PLOG_W("prctl(PR_SET_CHILD_SUBREAPER, 1)");
+    }
+
+    sigset_t ss;
+    sigemptyset(&ss);
+    sigaddset(&ss, SIGUSR1);
+    if (pthread_sigmask(SIG_BLOCK, &ss, NULL) != 0) {
+        PLOG_W("Couldn't block SIGUSR1");
+        return false;
+    }
 
     return true;
 }

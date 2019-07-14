@@ -123,23 +123,6 @@ const char* subproc_StatusToStr(int status, char* str, size_t len) {
     return str;
 }
 
-bool subproc_persistentModeRoundDone(run_t* run) {
-    if (!run->global->exe.persistent) {
-        return false;
-    }
-    uint8_t rcv;
-    if (recv(run->persistentSock, &rcv, sizeof(rcv), MSG_DONTWAIT) != sizeof(rcv)) {
-        return false;
-    }
-    if (rcv == HFdoneTag) {
-        return true;
-    }
-    LOG_F("Received invalid message from the persistent process: '%c' (0x%" PRIx8
-          ") , expected '%c' (0x%" PRIx8 ")",
-        rcv, rcv, HFdoneTag, HFdoneTag);
-    return false;
-}
-
 static bool subproc_persistentSendFileIndicator(run_t* run) {
     uint64_t len = (uint64_t)run->dynamicFileSz;
     if (!files_sendToSocketNB(run->persistentSock, (uint8_t*)&len, sizeof(len))) {
@@ -147,6 +130,57 @@ static bool subproc_persistentSendFileIndicator(run_t* run) {
         return false;
     }
     return true;
+}
+
+static bool subproc_persistentGetReady(run_t* run) {
+    uint8_t rcv;
+    if (recv(run->persistentSock, &rcv, sizeof(rcv), MSG_DONTWAIT) != sizeof(rcv)) {
+        return false;
+    }
+    if (rcv != HFReadyTag) {
+        LOG_E("Received invalid message from the persistent process: '%c' (0x%" PRIx8
+              ") , expected '%c' (0x%" PRIx8 ")",
+            rcv, rcv, HFReadyTag, HFReadyTag);
+        return false;
+    }
+    return true;
+}
+
+bool subproc_persistentModeStateMachine(run_t* run) {
+    if (!run->global->exe.persistent) {
+        return false;
+    }
+
+    for (;;) {
+        switch (run->runState) {
+            case _HF_RS_WAITING_FOR_INITIAL_READY: {
+                if (!subproc_persistentGetReady(run)) {
+                    return false;
+                }
+                run->runState = _HF_RS_SEND_DATA;
+            }; break;
+            case _HF_RS_SEND_DATA: {
+                if (!subproc_persistentSendFileIndicator(run)) {
+                    LOG_E("Could not send the file size indicator to the persistent process. "
+                          "Killing the process pid=%d",
+                        (int)run->pid);
+                    kill(run->pid, SIGKILL);
+                    return false;
+                }
+                run->runState = _HF_RS_WAITING_FOR_READY;
+            }; break;
+            case _HF_RS_WAITING_FOR_READY: {
+                if (!subproc_persistentGetReady(run)) {
+                    return false;
+                }
+                run->runState = _HF_RS_SEND_DATA;
+                /* The current persistent round is done */
+                return true;
+            }; break;
+            default:
+                LOG_F("Unknown runState: %d", run->runState);
+        }
+    }
 }
 
 static bool subproc_PrepareExecv(run_t* run) {
@@ -209,6 +243,7 @@ static bool subproc_PrepareExecv(run_t* run) {
         setenv(_HF_THREAD_NETDRIVER_ENV, "1", 1);
     }
 
+    /* Make sure it's a new process group / session, so waitpid can wait for -(run->pid) */
     setsid();
 
     util_closeStdio(/* close_stdin= */ run->global->exe.nullifyStdio,
@@ -216,15 +251,28 @@ static bool subproc_PrepareExecv(run_t* run) {
         /* close_stderr= */ run->global->exe.nullifyStdio);
 
     /* The bitmap structure */
-    if (run->global->feedback.bbFd != -1 && dup2(run->global->feedback.bbFd, _HF_BITMAP_FD) == -1) {
+    if (run->global->feedback.bbFd != -1 &&
+        TEMP_FAILURE_RETRY(dup2(run->global->feedback.bbFd, _HF_BITMAP_FD)) == -1) {
         PLOG_E("dup2(%d, _HF_BITMAP_FD=%d)", run->global->feedback.bbFd, _HF_BITMAP_FD);
         return false;
     }
 
     /* The input file to _HF_INPUT_FD */
-    if (run->global->exe.persistent && dup2(run->dynamicFileFd, _HF_INPUT_FD) == -1) {
+    if (run->global->exe.persistent &&
+        TEMP_FAILURE_RETRY(dup2(run->dynamicFileFd, _HF_INPUT_FD)) == -1) {
         PLOG_E("dup2('%d', _HF_INPUT_FD='%d')", run->dynamicFileFd, _HF_INPUT_FD);
         return false;
+    }
+
+    /* The log FD */
+    if ((run->global->exe.netDriver || run->global->exe.persistent)) {
+        if (TEMP_FAILURE_RETRY(dup2(logFd(), _HF_LOG_FD)) == -1) {
+            PLOG_E("dup2(%d, _HF_LOG_FD=%d)", logFd(), _HF_LOG_FD);
+            return false;
+        }
+        char llstr[32];
+        snprintf(llstr, sizeof(llstr), "%d", logGetLevel());
+        setenv(_HF_LOG_LEVEL_ENV, llstr, 1);
     }
 
     sigset_t sset;
@@ -239,7 +287,8 @@ static bool subproc_PrepareExecv(run_t* run) {
             LOG_E("Couldn't save data to a temporary file");
             return false;
         }
-        if (run->global->exe.fuzzStdin && dup2(run->dynamicFileCopyFd, STDIN_FILENO) == -1) {
+        if (run->global->exe.fuzzStdin &&
+            TEMP_FAILURE_RETRY(dup2(run->dynamicFileCopyFd, STDIN_FILENO)) == -1) {
             PLOG_E("dup2(_HF_INPUT_FD=%d, STDIN_FILENO=%d)", run->dynamicFileCopyFd, STDIN_FILENO);
             return false;
         }
@@ -249,14 +298,9 @@ static bool subproc_PrepareExecv(run_t* run) {
 }
 
 static bool subproc_New(run_t* run) {
-    run->pid = run->persistentPid;
-    if (run->pid != 0 && run->hasCrashed == false) {
+    if (run->pid) {
         return true;
     }
-
-    LOG_D("SocketFuzzer: subproc_new: Start New Process");
-    run->hasCrashed = false;
-    run->tmOutSignaled = false;
 
     int sv[2];
     if (run->global->exe.persistent) {
@@ -280,6 +324,7 @@ static bool subproc_New(run_t* run) {
     run->pid = arch_fork(run);
     if (run->pid == -1) {
         PLOG_E("Couldn't fork");
+        run->pid = 0;
         return false;
     }
     /* The child process */
@@ -299,7 +344,7 @@ static bool subproc_New(run_t* run) {
         signal(SIGALRM, SIG_DFL);
 
         if (run->global->exe.persistent) {
-            if (dup2(sv[1], _HF_PERSISTENT_FD) == -1) {
+            if (TEMP_FAILURE_RETRY(dup2(sv[1], _HF_PERSISTENT_FD)) == -1) {
                 PLOG_F("dup2('%d', '%d')", sv[1], _HF_PERSISTENT_FD);
             }
             close(sv[0]);
@@ -319,20 +364,16 @@ static bool subproc_New(run_t* run) {
     }
 
     /* Parent */
-    LOG_D("Launched new process, PID: %d, thread: %" PRId32 " (concurrency: %zd)", run->pid,
+    LOG_D("Launched new process, pid=%d, thread: %" PRId32 " (concurrency: %zd)", (int)run->pid,
         run->fuzzNo, run->global->threads.threadsMax);
 
-    if (run->global->socketFuzzer.enabled) {
-        /* (dobin): Don't know why, but this is important */
-        run->persistentPid = run->pid;
-    }
+    arch_prepareParentAfterFork(run);
+
     if (run->global->exe.persistent) {
         close(sv[1]);
-        LOG_I("Persistent mode: Launched new persistent PID: %d", (int)run->pid);
-        run->persistentPid = run->pid;
+        run->runState = _HF_RS_WAITING_FOR_INITIAL_READY;
+        LOG_I("Persistent mode: Launched new persistent pid=%d", (int)run->pid);
     }
-
-    arch_prepareParentAfterFork(run);
 
     return true;
 }
@@ -346,11 +387,6 @@ bool subproc_Run(run_t* run) {
     }
 
     arch_prepareParent(run);
-
-    if (run->global->exe.persistent && !subproc_persistentSendFileIndicator(run)) {
-        LOG_W("Could not send file size to the persistent process");
-        kill(run->persistentPid, SIGKILL);
-    }
     arch_reapChild(run);
 
     return true;
@@ -380,19 +416,19 @@ uint8_t subproc_System(run_t* run, const char* const argv[]) {
         return 255;
     }
 
-    int status;
     int flags = 0;
 #if defined(__WNOTHREAD)
     flags |= __WNOTHREAD;
 #endif /* defined(__WNOTHREAD) */
+#if defined(__WALL)
+    flags |= __WALL;
+#endif /* defined(__WALL) */
 
     for (;;) {
-        int ret = wait4(pid, &status, flags, NULL);
-        if (ret == -1 && errno == EINTR) {
-            continue;
-        }
+        int status;
+        int ret = TEMP_FAILURE_RETRY(wait4(pid, &status, flags, NULL));
         if (ret == -1) {
-            PLOG_E("wait4() for process PID: %d", (int)pid);
+            PLOG_E("wait4() for process pid=%d", (int)pid);
             return 255;
         }
         if (ret != pid) {
@@ -416,7 +452,7 @@ uint8_t subproc_System(run_t* run, const char* const argv[]) {
 }
 
 void subproc_checkTimeLimit(run_t* run) {
-    if (run->global->timing.tmOut == 0) {
+    if (!run->global->timing.tmOut) {
         return;
     }
 
@@ -425,14 +461,14 @@ void subproc_checkTimeLimit(run_t* run) {
 
     if (run->tmOutSignaled && (diffMillis > ((run->global->timing.tmOut + 1) * 1000))) {
         /* Has this instance been already signaled due to timeout? Just, SIGKILL it */
-        LOG_W("PID %d has already been signaled due to timeout. Killing it with SIGKILL", run->pid);
+        LOG_W("pid=%d has already been signaled due to timeout. Killing it with SIGKILL", run->pid);
         kill(run->pid, SIGKILL);
         return;
     }
 
     if ((diffMillis > (run->global->timing.tmOut * 1000)) && !run->tmOutSignaled) {
         run->tmOutSignaled = true;
-        LOG_W("PID %d took too much time (limit %ld s). Killing it with %s", run->pid,
+        LOG_W("pid=%d took too much time (limit %ld s). Killing it with %s", (int)run->pid,
             (long)run->global->timing.tmOut,
             run->global->timing.tmoutVTALRM ? "SIGVTALRM" : "SIGKILL");
         if (run->global->timing.tmoutVTALRM) {
@@ -446,7 +482,27 @@ void subproc_checkTimeLimit(run_t* run) {
 
 void subproc_checkTermination(run_t* run) {
     if (fuzz_isTerminating()) {
-        LOG_D("Killing PID: %d", (int)run->pid);
+        LOG_D("Killing pid=%d", (int)run->pid);
         kill(run->pid, SIGKILL);
     }
+}
+
+bool subproc_runThread(
+    honggfuzz_t* hfuzz, pthread_t* thread, void* (*thread_func)(void*), bool joinable) {
+    pthread_attr_t attr;
+
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(
+        &attr, joinable ? PTHREAD_CREATE_JOINABLE : PTHREAD_CREATE_DETACHED);
+    pthread_attr_setstacksize(&attr, _HF_PTHREAD_STACKSIZE);
+    pthread_attr_setguardsize(&attr, (size_t)sysconf(_SC_PAGESIZE));
+
+    if (pthread_create(thread, &attr, thread_func, (void*)hfuzz) < 0) {
+        PLOG_W("Couldn't create a new thread");
+        return false;
+    }
+
+    pthread_attr_destroy(&attr);
+
+    return true;
 }

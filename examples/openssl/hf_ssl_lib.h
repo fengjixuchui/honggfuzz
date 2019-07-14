@@ -24,12 +24,6 @@ extern "C" {
 #define HF_SSL_IS_OPENSSL
 #endif
 
-#define FUZZTIME 1485898104
-time_t __wrap_time(time_t* t) {
-    if (t != NULL) *t = FUZZTIME;
-    return FUZZTIME;
-}
-
 #if defined(HF_SSL_IS_BORINGSSL)
 static int hf_rnd(unsigned char* buf, size_t num)
 #else  /* defined(HF_SSL_IS_BORINGSSL) */
@@ -42,7 +36,9 @@ static int hf_rnd(unsigned char* buf, int num)
     return 1;
 }
 
-static int hf_stat(void) { return 1; }
+static int hf_stat(void) {
+    return 1;
+}
 
 static RAND_METHOD hf_method = {
     NULL,
@@ -53,7 +49,9 @@ static RAND_METHOD hf_method = {
     hf_stat,
 };
 
-static void HFResetRand(void) { RAND_set_rand_method(&hf_method); }
+static void HFResetRand(void) {
+    RAND_set_rand_method(&hf_method);
+}
 
 #if defined(HF_SSL_FROM_STDIN)
 int LLVMFuzzerInitialize(int* argc, char*** argv) __attribute__((weak));

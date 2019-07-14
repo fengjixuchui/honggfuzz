@@ -6,7 +6,7 @@
  * Authors: Robert Swiecki <swiecki@google.com>
  *          Felix Gröbert <groebert@google.com>
  *
- * Copyright 2010-2018 by Google Inc. All Rights Reserved.
+ * Copyright 2010-2019 by Google Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may
  * not use this file except in compliance with the License. You may obtain
@@ -22,6 +22,7 @@
  *
  */
 
+#include <errno.h>
 #include <getopt.h>
 #include <inttypes.h>
 #include <signal.h>
@@ -43,6 +44,7 @@
 #include "libhfcommon/log.h"
 #include "libhfcommon/util.h"
 #include "socketfuzzer.h"
+#include "subproc.h"
 
 static int sigReceived = 0;
 
@@ -56,18 +58,26 @@ static void exitWithMsg(const char* msg, int exit_code) {
     HF_ATTR_UNUSED ssize_t sz = write(STDERR_FILENO, msg, strlen(msg));
     for (;;) {
         exit(exit_code);
+        _exit(exit_code);
         abort();
+        __builtin_trap();
     }
 }
 
-static bool showDisplay = true;
-void sigHandler(int sig) {
+static void sigHandler(int sig) {
     /* We should not terminate upon SIGALRM delivery */
     if (sig == SIGALRM) {
         if (fuzz_shouldTerminate()) {
             exitWithMsg("Terminating forcefully\n", EXIT_FAILURE);
         }
-        showDisplay = true;
+        return;
+    }
+    /* Do nothing with pings from the main thread */
+    if (sig == SIGUSR1) {
+        return;
+    }
+    /* It's handled in the signal thread */
+    if (sig == SIGCHLD) {
         return;
     }
 
@@ -100,8 +110,16 @@ static void setupRLimits(void) {
 
 static void setupMainThreadTimer(void) {
     const struct itimerval it = {
-        .it_value = {.tv_sec = 1, .tv_usec = 0},
-        .it_interval = {.tv_sec = 0, .tv_usec = 1000 * 200},
+        .it_value =
+            {
+                .tv_sec = 1,
+                .tv_usec = 0,
+            },
+        .it_interval =
+            {
+                .tv_sec = 0,
+                .tv_usec = 1000ULL * 200ULL,
+            },
     };
     if (setitimer(ITIMER_REAL, &it, NULL) == -1) {
         PLOG_F("setitimer(ITIMER_REAL)");
@@ -117,14 +135,16 @@ static void setupSignalsPreThreads(void) {
     sigaddset(&ss, SIGQUIT);
     sigaddset(&ss, SIGALRM);
     sigaddset(&ss, SIGPIPE);
+    /* Linux/arch uses it to discover events from persistent fuzzing processes */
     sigaddset(&ss, SIGIO);
+    /* Let the signal thread catch SIGCHLD */
     sigaddset(&ss, SIGCHLD);
-    if (sigprocmask(SIG_BLOCK, &ss, NULL) != 0) {
-        PLOG_F("pthread_sigmask(SIG_BLOCK)");
+    /* This is checked for via sigwaitinfo/sigtimedwait */
+    sigaddset(&ss, SIGUSR1);
+    if (sigprocmask(SIG_SETMASK, &ss, NULL) != 0) {
+        PLOG_F("sigprocmask(SIG_SETMASK)");
     }
-}
 
-static void setupSignalsMainThread(void) {
     struct sigaction sa = {
         .sa_handler = sigHandler,
         .sa_flags = 0,
@@ -142,6 +162,15 @@ static void setupSignalsMainThread(void) {
     if (sigaction(SIGALRM, &sa, NULL) == -1) {
         PLOG_F("sigaction(SIGQUIT) failed");
     }
+    if (sigaction(SIGUSR1, &sa, NULL) == -1) {
+        PLOG_F("sigaction(SIGUSR1) failed");
+    }
+    if (sigaction(SIGCHLD, &sa, NULL) == -1) {
+        PLOG_F("sigaction(SIGCHLD) failed");
+    }
+}
+
+static void setupSignalsMainThread(void) {
     /* Unblock signals which should be handled by the main thread */
     sigset_t ss;
     sigemptyset(&ss);
@@ -149,7 +178,7 @@ static void setupSignalsMainThread(void) {
     sigaddset(&ss, SIGINT);
     sigaddset(&ss, SIGQUIT);
     sigaddset(&ss, SIGALRM);
-    if (sigprocmask(SIG_UNBLOCK, &ss, NULL) != 0) {
+    if (pthread_sigmask(SIG_UNBLOCK, &ss, NULL) != 0) {
         PLOG_F("pthread_sigmask(SIG_UNBLOCK)");
     }
 }
@@ -162,6 +191,41 @@ static void printSummary(honggfuzz_t* hfuzz) {
     }
     LOG_I("Summary iterations:%zu time:%" PRIu64 " speed:%" PRIu64, hfuzz->cnts.mutationsCnt,
         elapsed_sec, exec_per_sec);
+}
+
+static void pingThreads(honggfuzz_t* hfuzz) {
+    for (size_t i = 0; i < hfuzz->threads.threadsMax; i++) {
+        if (pthread_kill(hfuzz->threads.threads[i], SIGUSR1) != 0 && errno != EINTR) {
+            PLOG_W("pthread_kill(thread=%zu, SIGUSR1)", i);
+        }
+    }
+}
+
+static void* signalThread(void* arg) {
+    honggfuzz_t* hfuzz = (honggfuzz_t*)arg;
+
+    sigset_t ss;
+    sigemptyset(&ss);
+    sigaddset(&ss, SIGCHLD);
+    if (pthread_sigmask(SIG_UNBLOCK, &ss, NULL) != 0) {
+        PLOG_F("Couldn't unblock SIGCHLD in the signal thread");
+    }
+
+    for (;;) {
+        int sig;
+        if (sigwait(&ss, &sig) != 0 && errno != EINTR) {
+            PLOG_F("sigwait(SIGCHLD)");
+        }
+        if (fuzz_isTerminating()) {
+            break;
+        }
+
+        if (sig == SIGCHLD) {
+            pingThreads(hfuzz);
+        }
+    }
+
+    return NULL;
 }
 
 int main(int argc, char** argv) {
@@ -188,9 +252,8 @@ int main(int argc, char** argv) {
     }
 
     if (hfuzz.socketFuzzer.enabled) {
-        LOG_I(
-            "No input file corpus loaded, the external socket_fuzzer is responsible for "
-            "creating the fuzz data");
+        LOG_I("No input file corpus loaded, the external socket_fuzzer is responsible for "
+              "creating the fuzz data");
         setupSocketFuzzer(&hfuzz);
     } else if (!input_init(&hfuzz)) {
         LOG_F("Couldn't load input corpus");
@@ -223,22 +286,21 @@ int main(int argc, char** argv) {
         }
     }
 
-    /*
-     * So far, so good
-     */
-    pthread_t threads[hfuzz.threads.threadsMax];
-
     setupRLimits();
     setupSignalsPreThreads();
-    fuzz_threadsStart(&hfuzz, threads);
-    setupSignalsMainThread();
+    fuzz_threadsStart(&hfuzz);
 
+    pthread_t sigthread;
+    if (!subproc_runThread(&hfuzz, &sigthread, signalThread, /* joinable= */ false)) {
+        LOG_F("Couldn't start the signal thread");
+    }
+
+    setupSignalsMainThread();
     setupMainThreadTimer();
 
     for (;;) {
-        if (hfuzz.display.useScreen && showDisplay) {
+        if (hfuzz.display.useScreen) {
             display_display(&hfuzz);
-            showDisplay = false;
         }
         if (ATOMIC_GET(sigReceived) > 0) {
             LOG_I("Signal %d (%s) received, terminating", ATOMIC_GET(sigReceived),
@@ -252,11 +314,19 @@ int main(int argc, char** argv) {
             LOG_I("Maximum run time reached, terminating");
             break;
         }
+        pingThreads(&hfuzz);
         pause();
     }
 
     fuzz_setTerminating();
-    fuzz_threadsStop(&hfuzz, threads);
+
+    for (;;) {
+        if (ATOMIC_GET(hfuzz.threads.threadsFinished) >= hfuzz.threads.threadsMax) {
+            break;
+        }
+        pingThreads(&hfuzz);
+        util_sleepForMSec(50); /* 50ms */
+    }
 
     /* Clean-up global buffers */
     if (hfuzz.feedback.blacklist) {

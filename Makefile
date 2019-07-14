@@ -29,13 +29,9 @@ HFUZZ_CC_SRCS := hfuzz_cc/hfuzz-cc.c
 COMMON_CFLAGS := -D_GNU_SOURCE -Wall -Werror -Wno-format-truncation -I.
 COMMON_LDFLAGS := -lm libhfcommon/libhfcommon.a
 COMMON_SRCS := $(sort $(wildcard *.c))
-CFLAGS ?= -O3
+CFLAGS ?= -O3 -mtune=native
 LDFLAGS ?=
-LIBS_CFLAGS ?= -fPIC -fno-stack-protector -fno-builtin -D__NO_STRING_INLINES -D__NO_INLINE__
-HFUZZ_USE_RET_ADDR ?= false
-ifneq ($(HFUZZ_USE_RET_ADDR),false)
-    LIBS_CFLAGS += -D_HF_USE_RET_ADDR=$(HFUZZ_USE_RET_ADDR) -Wno-error=frame-address
-endif
+LIBS_CFLAGS ?= -fPIC -fno-stack-protector
 GREP_COLOR ?=
 
 OS ?= $(shell uname -s)
@@ -70,10 +66,11 @@ ifeq ($(OS)$(findstring Microsoft,$(KERNEL)),Linux) # matches Linux but excludes
         ARCH_LDFLAGS += -lipt
     endif
     ifdef WARN_LIBRARY
-        $(info ***************************************************************)
-        $(info Development libraries which are most likely missing on your OS:)
-        $(info $(WARN_LIBRARY))
-        $(info ***************************************************************)
+        $(info --------------------------------------------------------)
+        $(info Libraries which are most likely missing on your OS.     )
+        $(info This can result in linking/compilation errors.          )
+        $(info > $(WARN_LIBRARY))
+        $(info --------------------------------------------------------)
     endif
     # OS Linux
 else ifeq ($(OS),Darwin)
@@ -301,14 +298,14 @@ $(LCOMMON_ARCH): $(LCOMMON_OBJS)
 $(LHFUZZ_OBJS): $(LHFUZZ_SRCS)
 	$(CC) -c $(CFLAGS) $(LIBS_CFLAGS) -o $@ $(@:.o=.c)
 
-$(LHFUZZ_ARCH): $(LHFUZZ_OBJS) $(LCOMMON_OBJS)
-	$(AR) rcs $(LHFUZZ_ARCH) $(LHFUZZ_OBJS) $(LCOMMON_OBJS)
+$(LHFUZZ_ARCH): $(LHFUZZ_OBJS)
+	$(AR) rcs $(LHFUZZ_ARCH) $(LHFUZZ_OBJS)
 
 $(LNETDRIVER_OBJS): $(LNETDRIVER_SRCS)
 	$(CC) -c $(CFLAGS) $(LIBS_CFLAGS) -o $@ $(@:.o=.c)
 
-$(LNETDRIVER_ARCH): $(LNETDRIVER_OBJS) $(LCOMMON_OBJS)
-	$(AR) rcs $(LNETDRIVER_ARCH) $(LNETDRIVER_OBJS) $(LCOMMON_OBJS)
+$(LNETDRIVER_ARCH): $(LNETDRIVER_OBJS)
+	$(AR) rcs $(LNETDRIVER_ARCH) $(LNETDRIVER_OBJS)
 
 .PHONY: clean
 clean:
@@ -316,7 +313,7 @@ clean:
 
 .PHONY: indent
 indent:
-	clang-format -style="{BasedOnStyle: Google, IndentWidth: 4, ColumnLimit: 100, AlignAfterOpenBracket: false, AllowShortFunctionsOnASingleLine: false}" -i -sort-includes  *.c *.h */*.c */*.h
+	clang-format -style="{BasedOnStyle: Google, IndentWidth: 4, ColumnLimit: 100, AlignAfterOpenBracket: DontAlign, AllowShortFunctionsOnASingleLine: false, AlwaysBreakBeforeMultilineStrings: false}" -i -sort-includes  *.c *.h */*.c */*.h
 
 .PHONY: depend
 depend: all
@@ -395,7 +392,7 @@ fuzz.o: libhfcommon/log.h mangle.h report.h sanitizers.h socketfuzzer.h
 fuzz.o: subproc.h
 honggfuzz.o: cmdline.h honggfuzz.h libhfcommon/util.h libhfcommon/common.h
 honggfuzz.o: display.h fuzz.h input.h libhfcommon/files.h
-honggfuzz.o: libhfcommon/common.h libhfcommon/log.h socketfuzzer.h
+honggfuzz.o: libhfcommon/common.h libhfcommon/log.h socketfuzzer.h subproc.h
 input.o: input.h honggfuzz.h libhfcommon/util.h libhfcommon/common.h
 input.o: libhfcommon/files.h libhfcommon/common.h mangle.h subproc.h
 input.o: libhfcommon/log.h
@@ -406,9 +403,9 @@ report.o: libhfcommon/log.h
 sanitizers.o: sanitizers.h honggfuzz.h libhfcommon/util.h cmdline.h
 sanitizers.o: libhfcommon/common.h libhfcommon/files.h libhfcommon/common.h
 sanitizers.o: libhfcommon/log.h
-socketfuzzer.o: honggfuzz.h libhfcommon/util.h libhfcommon/common.h
-socketfuzzer.o: libhfcommon/files.h libhfcommon/common.h libhfcommon/log.h
-socketfuzzer.o: libhfcommon/ns.h socketfuzzer.h
+socketfuzzer.o: socketfuzzer.h honggfuzz.h libhfcommon/util.h
+socketfuzzer.o: libhfcommon/common.h libhfcommon/files.h libhfcommon/common.h
+socketfuzzer.o: libhfcommon/log.h libhfcommon/ns.h
 subproc.o: subproc.h honggfuzz.h libhfcommon/util.h arch.h fuzz.h
 subproc.o: libhfcommon/common.h libhfcommon/files.h libhfcommon/common.h
 subproc.o: libhfcommon/log.h
@@ -428,18 +425,19 @@ libhfnetdriver/netdriver.o: libhfnetdriver/netdriver.h honggfuzz.h
 libhfnetdriver/netdriver.o: libhfcommon/util.h libhfcommon/common.h
 libhfnetdriver/netdriver.o: libhfcommon/files.h libhfcommon/common.h
 libhfnetdriver/netdriver.o: libhfcommon/log.h libhfcommon/ns.h
+libhfuzz/fetch.o: libhfuzz/fetch.h honggfuzz.h libhfcommon/util.h
+libhfuzz/fetch.o: libhfcommon/common.h libhfcommon/files.h
+libhfuzz/fetch.o: libhfcommon/common.h libhfcommon/log.h
 libhfuzz/instrument.o: libhfuzz/instrument.h honggfuzz.h libhfcommon/util.h
 libhfuzz/instrument.o: libhfcommon/common.h libhfcommon/log.h
 libhfuzz/linux.o: libhfcommon/common.h libhfcommon/files.h
 libhfuzz/linux.o: libhfcommon/common.h libhfcommon/log.h libhfcommon/ns.h
 libhfuzz/linux.o: libhfuzz/libhfuzz.h
-libhfuzz/main.o: honggfuzz.h libhfcommon/util.h libhfcommon/log.h
-libhfuzz/main.o: libhfuzz/persistent.h
 libhfuzz/memorycmp.o: libhfcommon/common.h libhfuzz/instrument.h
-libhfuzz/persistent.o: libhfuzz/libhfuzz.h honggfuzz.h libhfcommon/util.h
-libhfuzz/persistent.o: libhfcommon/common.h libhfcommon/files.h
-libhfuzz/persistent.o: libhfcommon/common.h libhfcommon/log.h
-libhfuzz/persistent.o: libhfuzz/instrument.h
+libhfuzz/persistent.o: honggfuzz.h libhfcommon/util.h libhfcommon/common.h
+libhfuzz/persistent.o: libhfcommon/files.h libhfcommon/common.h
+libhfuzz/persistent.o: libhfcommon/log.h libhfuzz/fetch.h
+libhfuzz/persistent.o: libhfuzz/instrument.h libhfuzz/libhfuzz.h
 linux/arch.o: arch.h honggfuzz.h libhfcommon/util.h fuzz.h
 linux/arch.o: libhfcommon/common.h libhfcommon/files.h libhfcommon/common.h
 linux/arch.o: libhfcommon/log.h libhfcommon/ns.h linux/perf.h linux/trace.h
@@ -450,8 +448,8 @@ linux/bfd.o: libhfcommon/log.h
 linux/perf.o: linux/perf.h honggfuzz.h libhfcommon/util.h
 linux/perf.o: libhfcommon/common.h libhfcommon/files.h libhfcommon/common.h
 linux/perf.o: libhfcommon/log.h linux/pt.h
-linux/pt.o: libhfcommon/common.h libhfcommon/log.h libhfcommon/util.h
-linux/pt.o: linux/pt.h honggfuzz.h
+linux/pt.o: linux/pt.h honggfuzz.h libhfcommon/util.h libhfcommon/common.h
+linux/pt.o: libhfcommon/log.h
 linux/trace.o: linux/trace.h honggfuzz.h libhfcommon/util.h
 linux/trace.o: libhfcommon/common.h libhfcommon/files.h libhfcommon/common.h
 linux/trace.o: libhfcommon/log.h linux/bfd.h linux/unwind.h sanitizers.h
@@ -463,12 +461,10 @@ mac/arch.o: libhfcommon/files.h libhfcommon/common.h libhfcommon/log.h
 mac/arch.o: subproc.h
 netbsd/arch.o: arch.h honggfuzz.h libhfcommon/util.h fuzz.h
 netbsd/arch.o: libhfcommon/common.h libhfcommon/files.h libhfcommon/common.h
-netbsd/arch.o: libhfcommon/log.h libhfcommon/ns.h netbsd/trace.h sanitizers.h
-netbsd/arch.o: subproc.h
+netbsd/arch.o: libhfcommon/log.h libhfcommon/ns.h netbsd/trace.h subproc.h
 netbsd/trace.o: netbsd/trace.h honggfuzz.h libhfcommon/util.h
 netbsd/trace.o: libhfcommon/common.h libhfcommon/files.h libhfcommon/common.h
-netbsd/trace.o: libhfcommon/log.h netbsd/unwind.h sanitizers.h socketfuzzer.h
-netbsd/trace.o: subproc.h
+netbsd/trace.o: libhfcommon/log.h netbsd/unwind.h socketfuzzer.h subproc.h
 netbsd/unwind.o: netbsd/unwind.h honggfuzz.h libhfcommon/util.h
 netbsd/unwind.o: libhfcommon/common.h libhfcommon/log.h
 posix/arch.o: arch.h honggfuzz.h libhfcommon/util.h fuzz.h

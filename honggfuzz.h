@@ -38,7 +38,7 @@
 #include "libhfcommon/util.h"
 
 #define PROG_NAME "honggfuzz"
-#define PROG_VERSION "1.7"
+#define PROG_VERSION "1.9"
 
 /* Name of the template which will be replaced with the proper name of the file */
 #define _HF_FILE_PLACEHOLDER "___FILE___"
@@ -47,13 +47,16 @@
 #define _HF_REPORT_FILE "HONGGFUZZ.REPORT.TXT"
 
 /* Default stack-size of created threads. */
-#define _HF_PTHREAD_STACKSIZE (1024 * 1024 * 2) /* 2MB */
+#define _HF_PTHREAD_STACKSIZE (1024ULL * 1024ULL * 2ULL) /* 2MB */
 
 /* Name of envvar which indicates sequential number of fuzzer */
 #define _HF_THREAD_NO_ENV "HFUZZ_THREAD_NO"
 
 /* Name of envvar which indicates that the netDriver should be used */
 #define _HF_THREAD_NETDRIVER_ENV "HFUZZ_USE_NETDRIVER"
+
+/* Name of envvar which indicates honggfuzz's log level in use */
+#define _HF_LOG_LEVEL_ENV "HFUZZ_LOG_LEVEL"
 
 /* Number of crash verifier iterations before tag crash as stable */
 #define _HF_VERIFIER_ITER 5
@@ -63,13 +66,15 @@
 
 /* Perf bitmap size */
 #define _HF_PERF_BITMAP_SIZE_16M (1024U * 1024U * 16U)
-#define _HF_PERF_BITMAP_BITSZ_MASK 0x7ffffff
+#define _HF_PERF_BITMAP_BITSZ_MASK 0x7FFFFFFULL
 /* Maximum number of PC guards (=trace-pc-guard) we support */
-#define _HF_PC_GUARD_MAX (1024U * 1024U * 16U)
+#define _HF_PC_GUARD_MAX (1024ULL * 1024ULL * 64ULL)
 
 /* Maximum size of the input file in bytes (128 MiB) */
-#define _HF_INPUT_MAX_SIZE (1024 * 1024 * 128)
+#define _HF_INPUT_MAX_SIZE (1024ULL * 1024ULL * 128ULL)
 
+/* FD used to log inside the child process */
+#define _HF_LOG_FD 1020
 /* FD used to represent the input file */
 #define _HF_INPUT_FD 1021
 /* FD used to pass feedback bitmap a process */
@@ -77,8 +82,8 @@
 /* FD used to pass data to a persistent process */
 #define _HF_PERSISTENT_FD 1023
 
-/* Message indicating that the fuzz process has finished processing data (fuzzed->fuzzer) */
-static const uint8_t HFdoneTag = 'D';
+/* Message indicating that the fuzzed process is ready for new data */
+static const uint8_t HFReadyTag = 'R';
 
 /* Maximum number of active fuzzing threads */
 #define _HF_THREAD_MAX 1024U
@@ -144,7 +149,8 @@ typedef enum {
     _HF_STATE_UNSET = 0,
     _HF_STATE_STATIC = 1,
     _HF_STATE_DYNAMIC_DRY_RUN = 2,
-    _HF_STATE_DYNAMIC_MAIN = 3,
+    _HF_STATE_DYNAMIC_SWITCH_TO_MAIN = 3,
+    _HF_STATE_DYNAMIC_MAIN = 4,
 } fuzzState_t;
 
 struct dynfile_t {
@@ -164,7 +170,7 @@ struct strings_t {
 typedef struct {
     bool pcGuardMap[_HF_PC_GUARD_MAX];
     uint8_t bbMapPc[_HF_PERF_BITMAP_SIZE_16M];
-    uint8_t bbMapCmp[_HF_PERF_BITMAP_SIZE_16M];
+    uint32_t bbMapCmp[_HF_PERF_BITMAP_SIZE_16M];
     uint64_t pidFeedbackPc[_HF_THREAD_MAX];
     uint64_t pidFeedbackEdge[_HF_THREAD_MAX];
     uint64_t pidFeedbackCmp[_HF_THREAD_MAX];
@@ -177,6 +183,7 @@ typedef struct {
         uint32_t threadsActiveCnt;
         pthread_t mainThread;
         pid_t mainPid;
+        pthread_t threads[_HF_THREAD_MAX];
     } threads;
     struct {
         const char* inputDir;
@@ -200,6 +207,7 @@ typedef struct {
         bool fuzzStdin;
         const char* externalCommand;
         const char* postExternalCommand;
+        const char* feedbackMutateCommand;
         bool netDriver;
         bool persistent;
         uint64_t asLimit;
@@ -208,6 +216,7 @@ typedef struct {
         uint64_t coreLimit;
         bool clearEnv;
         char* envs[128];
+        sigset_t waitSigSet;
     } exe;
     struct {
         time_t timeStart;
@@ -273,9 +282,6 @@ typedef struct {
         bool disableRandomization;
         void* ignoreAddr;
         size_t numMajorFrames;
-        pid_t pid;
-        const char* pidFile;
-        char pidCmd[55];
         const char* symsBlFile;
         char** symsBl;
         size_t symsBlCnt;
@@ -285,29 +291,30 @@ typedef struct {
         uintptr_t cloneFlags;
         bool kernelOnly;
         bool useClone;
-        sigset_t waitSigSet;
     } linux;
     /* For the NetBSD code */
     struct {
         void* ignoreAddr;
         size_t numMajorFrames;
-        pid_t pid;
-        const char* pidFile;
-        char pidCmd[55];
         const char* symsBlFile;
         char** symsBl;
         size_t symsBlCnt;
         const char* symsWlFile;
         char** symsWl;
         size_t symsWlCnt;
-        sigset_t waitSigSet;
     } netbsd;
 } honggfuzz_t;
+
+typedef enum {
+    _HF_RS_UNKNOWN = 0,
+    _HF_RS_WAITING_FOR_INITIAL_READY = 1,
+    _HF_RS_WAITING_FOR_READY = 2,
+    _HF_RS_SEND_DATA = 3,
+} runState_t;
 
 typedef struct {
     honggfuzz_t* global;
     pid_t pid;
-    pid_t persistentPid;
     int64_t timeStartedMillis;
     char origFileName[PATH_MAX];
     char crashFileName[PATH_MAX];
@@ -325,6 +332,8 @@ typedef struct {
     int dynamicFileCopyFd;
     uint32_t fuzzNo;
     int persistentSock;
+    bool waitingForReady;
+    runState_t runState;
     bool tmOutSignaled;
 #if !defined(_HF_ARCH_DARWIN)
     timer_t timerId;
@@ -335,7 +344,6 @@ typedef struct {
         uint8_t* perfMmapBuf;
         uint8_t* perfMmapAux;
         hwcnt_t hwCnts;
-        pid_t attachedPid;
         int cpuInstrFd;
         int cpuBranchFd;
         int cpuIptBtsFd;
@@ -346,13 +354,10 @@ typedef struct {
         uint8_t* perfMmapBuf;
         uint8_t* perfMmapAux;
         hwcnt_t hwCnts;
-        pid_t attachedPid;
         int cpuInstrFd;
         int cpuBranchFd;
         int cpuIptBtsFd;
     } netbsd;
-
-    bool hasCrashed;
 } run_t;
 
 /*
