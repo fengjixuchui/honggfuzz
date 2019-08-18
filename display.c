@@ -63,7 +63,9 @@ __attribute__((format(printf, 1, 2))) static void display_put(const char* fmt, .
 }
 
 static void display_printKMG(uint64_t val) {
-    if (val >= 1000000000UL) {
+    if (val >= 1000000000000ULL) {
+        display_put(" [%.02LfT]", (long double)val / 1000000000.0L);
+    } else if (val >= 1000000000UL) {
         display_put(" [%.02LfG]", (long double)val / 1000000000.0L);
     } else if (val >= 1000000UL) {
         display_put(" [%.02LfM]", (long double)val / 1000000.0L);
@@ -249,7 +251,9 @@ static void display_displayLocked(honggfuzz_t* hfuzz) {
         uint64_t softCntPc = ATOMIC_GET(hfuzz->linux.hwCnts.softCntPc);
         uint64_t softCntEdge = ATOMIC_GET(hfuzz->linux.hwCnts.softCntEdge);
         uint64_t softCntCmp = ATOMIC_GET(hfuzz->linux.hwCnts.softCntCmp);
-        display_put(" edge: " ESC_BOLD "%" _HF_NONMON_SEP PRIu64 ESC_RESET, softCntEdge);
+        display_put(" edge: " ESC_BOLD "%" _HF_NONMON_SEP PRIu64 ESC_RESET "/" ESC_BOLD
+                    "%" _HF_NONMON_SEP PRIu64 ESC_RESET,
+            softCntEdge, ATOMIC_GET(hfuzz->feedback.feedbackMap->guardNb));
         display_put(" pc: " ESC_BOLD "%" _HF_NONMON_SEP PRIu64 ESC_RESET, softCntPc);
         display_put(" cmp: " ESC_BOLD "%" _HF_NONMON_SEP PRIu64 ESC_RESET, softCntCmp);
     }
