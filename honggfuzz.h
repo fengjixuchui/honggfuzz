@@ -147,24 +147,24 @@ typedef struct node {
 
 typedef enum {
     _HF_STATE_UNSET = 0,
-    _HF_STATE_STATIC = 1,
-    _HF_STATE_DYNAMIC_DRY_RUN = 2,
-    _HF_STATE_DYNAMIC_SWITCH_TO_MAIN = 3,
-    _HF_STATE_DYNAMIC_MAIN = 4,
+    _HF_STATE_STATIC,
+    _HF_STATE_DYNAMIC_DRY_RUN,
+    _HF_STATE_DYNAMIC_MAIN,
+    _HF_STATE_DYNAMIC_MINIMIZE,
 } fuzzState_t;
 
 struct dynfile_t {
-    uint8_t* data;
     size_t size;
-    TAILQ_ENTRY(dynfile_t)
-    pointers;
+    uint64_t cov[4];
+    char path[PATH_MAX];
+    TAILQ_ENTRY(dynfile_t) pointers;
+    uint8_t data[];
 };
 
 struct strings_t {
-    char* s;
     size_t len;
-    TAILQ_ENTRY(strings_t)
-    pointers;
+    TAILQ_ENTRY(strings_t) pointers;
+    char s[];
 };
 
 typedef struct {
@@ -188,6 +188,7 @@ typedef struct {
     } threads;
     struct {
         const char* inputDir;
+        const char* outputDir;
         DIR* inputDirPtr;
         size_t fileCnt;
         const char* fileExtn;
@@ -195,11 +196,11 @@ typedef struct {
         size_t newUnitsAdded;
         const char* workDir;
         const char* crashDir;
-        const char* covDirAll;
         const char* covDirNew;
         bool saveUnique;
         size_t dynfileqCnt;
         pthread_rwlock_t dynfileq_mutex;
+        struct dynfile_t* dynfileqCurrent;
         TAILQ_HEAD(dyns_t, dynfile_t) dynfileq;
     } io;
     struct {
@@ -249,6 +250,8 @@ typedef struct {
         bool monitorSIGABRT;
         size_t dynFileIterExpire;
         bool only_printable;
+        bool minimize;
+        bool switchingToFDM;
     } cfg;
     struct {
         bool enable;
@@ -328,11 +331,9 @@ typedef struct {
     char report[_HF_REPORT_SIZE];
     bool mainWorker;
     unsigned mutationsPerRun;
-    struct dynfile_t* dynfileqCurrent;
     uint8_t* dynamicFile;
     size_t dynamicFileSz;
     int dynamicFileFd;
-    int dynamicFileCopyFd;
     uint32_t fuzzNo;
     int persistentSock;
     bool waitingForReady;

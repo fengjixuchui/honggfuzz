@@ -17,7 +17,7 @@
 
 /*
  * If this signature is visible inside a binary, it's probably a persistent-style fuzzing program.
- * This mode of discover is employed by honggfuzz
+ * This discovery mode is employed by honggfuzz
  */
 __attribute__((visibility("default"))) __attribute__((used)) const char* LIBHFUZZ_module_fetch =
     _HF_PERSISTENT_SIG;
@@ -51,6 +51,10 @@ void HonggfuzzFetchData(const uint8_t** buf_ptr, size_t* len_ptr) {
 
     *buf_ptr = inputFile;
     *len_ptr = (size_t)rcvLen;
+
+    if (lseek(_HF_INPUT_FD, (off_t)0, SEEK_SET) == -1) {
+        PLOG_W("lseek(_HF_INPUT_FD=%d, 0)", _HF_INPUT_FD);
+    }
 }
 
 bool fetchIsInputAvailable(void) {

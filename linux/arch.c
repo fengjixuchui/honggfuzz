@@ -122,6 +122,13 @@ bool arch_launchChild(run_t* run) {
         return false;
     }
 
+    /* Increase our OOM score, so fuzzed processes die faster */
+    static const char score100[] = "+500";
+    if (!files_writeBufToFile(
+            "/proc/self/oom_score_adj", (uint8_t*)score100, strlen(score100), O_WRONLY)) {
+        LOG_W("Couldn't increase our oom_score");
+    }
+
     /*
      * Disable ASLR:
      * This might fail in Docker, as Docker blocks __NR_personality. Consequently
@@ -135,15 +142,11 @@ bool arch_launchChild(run_t* run) {
 #define ARGS_MAX 512
     const char* args[ARGS_MAX + 2];
     char argData[PATH_MAX];
-
-    char inputFile[PATH_MAX];
-    snprintf(inputFile, sizeof(inputFile), "/dev/fd/%d", run->dynamicFileCopyFd);
+    const char inputFile[] = "/dev/fd/" HF_XSTR(_HF_INPUT_FD);
 
     int x = 0;
     for (x = 0; x < ARGS_MAX && x < run->global->exe.argc; x++) {
-        if (run->global->exe.persistent || run->global->exe.fuzzStdin) {
-            args[x] = run->global->exe.cmdline[x];
-        } else if (!strcmp(run->global->exe.cmdline[x], _HF_FILE_PLACEHOLDER)) {
+        if (!strcmp(run->global->exe.cmdline[x], _HF_FILE_PLACEHOLDER)) {
             args[x] = inputFile;
         } else if (strstr(run->global->exe.cmdline[x], _HF_FILE_PLACEHOLDER)) {
             const char* off = strstr(run->global->exe.cmdline[x], _HF_FILE_PLACEHOLDER);
@@ -267,10 +270,10 @@ void arch_reapChild(run_t* run) {
             .tv_sec = 0ULL,
             .tv_nsec = (1000ULL * 1000ULL * 250ULL),
         };
-        /* Return with SIGIO, SIGCHLD and with SIGUSR1 */
+        /* Return with SIGIO, SIGCHLD */
         int sig = sigtimedwait(&run->global->exe.waitSigSet, NULL, &ts /* 0.25s */);
         if (sig == -1 && (errno != EAGAIN && errno != EINTR)) {
-            PLOG_F("sigwaitinfo(SIGIO|SIGCHLD|SIGUSR1)");
+            PLOG_F("sigwaitinfo(SIGIO|SIGCHLD)");
         }
 
         if (arch_checkWait(run)) {
@@ -430,14 +433,6 @@ bool arch_archThreadInit(run_t* run) {
 
     if (prctl(PR_SET_CHILD_SUBREAPER, 1UL, 0UL, 0UL, 0UL) == -1) {
         PLOG_W("prctl(PR_SET_CHILD_SUBREAPER, 1)");
-    }
-
-    sigset_t ss;
-    sigemptyset(&ss);
-    sigaddset(&ss, SIGUSR1);
-    if (pthread_sigmask(SIG_BLOCK, &ss, NULL) != 0) {
-        PLOG_W("Couldn't block SIGUSR1");
-        return false;
     }
 
     return true;

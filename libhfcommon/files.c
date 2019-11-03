@@ -41,6 +41,7 @@
 #if defined(_HF_ARCH_LINUX)
 #include <sys/syscall.h>
 #endif /* defined(_HF_ARCH_LINUX) */
+#include <sys/time.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -68,7 +69,7 @@ ssize_t files_readFileToBufMax(const char* fileName, uint8_t* buf, size_t fileMa
 bool files_writeBufToFile(const char* fileName, const uint8_t* buf, size_t fileSz, int flags) {
     int fd = TEMP_FAILURE_RETRY(open(fileName, flags, 0644));
     if (fd == -1) {
-        PLOG_W("Couldn't open '%s' for R/W", fileName);
+        PLOG_W("Couldn't create/open '%s' for R/W", fileName);
         return false;
     }
 
@@ -204,96 +205,6 @@ const char* files_basename(const char* path) {
 }
 
 /*
- * dstExists argument can be used by caller for cases where existing destination
- * file requires special handling (e.g. save unique crashes)
- */
-bool files_copyFile(const char* source, const char* destination, bool* dstExists, bool try_link) {
-    if (dstExists) {
-        *dstExists = false;
-    }
-
-    if (try_link) {
-        if (link(source, destination) == 0) {
-            return true;
-        } else {
-            if (errno == EEXIST) {
-                // Should kick-in before MAC, so avoid the hassle
-                if (dstExists) *dstExists = true;
-                return false;
-            } else {
-                PLOG_D("Couldn't link '%s' as '%s'", source, destination);
-                /*
-                 * Don't fail yet as we might have a running env which doesn't allow
-                 * hardlinks (e.g. SELinux)
-                 */
-            }
-        }
-    }
-    // Now try with a verbose POSIX alternative
-    int inFD, outFD, dstOpenFlags;
-    mode_t dstFilePerms;
-
-    // O_EXCL is important for saving unique crashes
-    dstOpenFlags = O_CREAT | O_WRONLY | O_CLOEXEC | O_EXCL;
-    dstFilePerms = S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH;
-
-    inFD = TEMP_FAILURE_RETRY(open(source, O_RDONLY | O_CLOEXEC));
-    if (inFD == -1) {
-        PLOG_D("Couldn't open '%s' source", source);
-        return false;
-    }
-
-    struct stat inSt;
-    if (fstat(inFD, &inSt) == -1) {
-        PLOG_W("Couldn't fstat(fd='%d' fileName='%s')", inFD, source);
-        close(inFD);
-        return false;
-    }
-
-    outFD = TEMP_FAILURE_RETRY(open(destination, dstOpenFlags, dstFilePerms));
-    if (outFD == -1) {
-        if (errno == EEXIST) {
-            if (dstExists) *dstExists = true;
-        }
-        PLOG_D("Couldn't open '%s' destination", destination);
-        close(inFD);
-        return false;
-    }
-
-    uint8_t* inFileBuf = malloc(inSt.st_size);
-    if (!inFileBuf) {
-        PLOG_W("malloc(%zu) failed", (size_t)inSt.st_size);
-        close(inFD);
-        close(outFD);
-        return false;
-    }
-
-    ssize_t readSz = files_readFromFd(inFD, inFileBuf, (size_t)inSt.st_size);
-    if (readSz < 0) {
-        PLOG_W("Couldn't read '%s' to a buf", source);
-        free(inFileBuf);
-        close(inFD);
-        close(outFD);
-        return false;
-    }
-
-    if (files_writeToFd(outFD, inFileBuf, readSz) == false) {
-        PLOG_W("Couldn't write '%zu' bytes to file '%s' (fd='%d')", (size_t)readSz, destination,
-            outFD);
-        unlink(destination);
-        free(inFileBuf);
-        close(inFD);
-        close(outFD);
-        return false;
-    }
-
-    free(inFileBuf);
-    close(inFD);
-    close(outFD);
-    return true;
-}
-
-/*
  * Reads symbols from src file (one per line) and append them to filterList. The
  * total number of added symbols is returned.
  *
@@ -369,31 +280,38 @@ uint8_t* files_mapFile(const char* fileName, off_t* fileSz, int* fd, bool isWrit
     return buf;
 }
 
-uint8_t* files_mapFileShared(const char* fileName, off_t* fileSz, int* fd) {
-    if ((*fd = TEMP_FAILURE_RETRY(open(fileName, O_RDONLY))) == -1) {
-        PLOG_W("Couldn't open() '%s' file in R/O mode", fileName);
-        return NULL;
+/* mmap flags for various OSs, when mmap'ing a temporary file or a shared mem */
+int files_getTmpMapFlags(int flag, bool nocore) {
+#if defined(MAP_NOSYNC)
+    /*
+     * Some kind of bug in FreeBSD kernel. Without this flag, the shm_open() memory will cause a lot
+     * of troubles to the calling process when mmap()'d
+     */
+    flag |= MAP_NOSYNC;
+#endif /* defined(MAP_NOSYNC) */
+#if defined(MAP_HASSEMAPHORE)
+    /* Our shared/mmap'd pages can have mutexes in them */
+    flag |= MAP_HASSEMAPHORE;
+#endif /* defined(MAP_HASSEMAPHORE) */
+       /* Avoid mapping the memory lazily */
+#if defined(MAP_PREFAULT_READ)
+    flag |= MAP_PREFAULT_READ;
+#endif /* defined(MAP_PREFAULT_READ) */
+#if defined(MAP_POPULATE)
+    flag |= MAP_POPULATE;
+#endif /* defined(MAP_POPULATE) */
+    if (nocore) {
+#if defined(MAP_CONCEAL)
+        flag |= MAP_CONCEAL;
+#endif /* defined(MAP_CONCEAL) */
+#if defined(MAP_NOCORE)
+        flag |= MAP_NOCORE;
+#endif /* defined(MAP_NOCORE) */
     }
-
-    struct stat st;
-    if (fstat(*fd, &st) == -1) {
-        PLOG_W("Couldn't stat() the '%s' file", fileName);
-        close(*fd);
-        return NULL;
-    }
-
-    uint8_t* buf;
-    if ((buf = mmap(NULL, st.st_size, PROT_READ, MAP_SHARED, *fd, 0)) == MAP_FAILED) {
-        PLOG_W("Couldn't mmap() the '%s' file", fileName);
-        close(*fd);
-        return NULL;
-    }
-
-    *fileSz = st.st_size;
-    return buf;
+    return flag;
 }
 
-void* files_mapSharedMem(size_t sz, int* fd, const char* name, const char* dir) {
+void* files_mapSharedMem(size_t sz, int* fd, const char* name, bool nocore) {
     *fd = -1;
 
 #if defined(_HF_ARCH_LINUX)
@@ -414,9 +332,32 @@ void* files_mapSharedMem(size_t sz, int* fd, const char* name, const char* dir) 
 
 #endif /* defined(_HF_ARCH_LINUX) */
 
+/* SHM_ANON is available with some *BSD OSes */
+#if defined(SHM_ANON)
+    if (*fd == -1) {
+        if ((*fd = shm_open(SHM_ANON, O_RDWR | O_CLOEXEC, 0600)) == -1) {
+            PLOG_W("shm_open(SHM_ANON, O_RDWR|O_CLOEXEC, 0600)");
+        }
+    }
+#endif /* defined(SHM_ANON) */
+#if !defined(_HF_ARCH_DARWIN) && !defined(__ANDROID__)
+    /* shm objects under MacOSX are 'a-typical' */
+    if (*fd == -1) {
+        char tmpname[PATH_MAX];
+        struct timeval tv;
+        gettimeofday(&tv, NULL);
+        snprintf(tmpname, sizeof(tmpname), "/%s%lx%lx%d", name, (unsigned long)tv.tv_sec,
+            (unsigned long)tv.tv_usec, (int)getpid());
+        if ((*fd = shm_open(tmpname, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600)) == -1) {
+            PLOG_W("shm_open('%s', O_RDWR|O_CREAT|O_EXCL|O_CLOEXEC, 0600)", tmpname);
+        } else {
+            shm_unlink(tmpname);
+        }
+    }
+#endif /* !defined(_HF_ARCH_DARWIN) && !defined(__ANDROID__) */
     if (*fd == -1) {
         char template[PATH_MAX];
-        snprintf(template, sizeof(template), "%s/%s.XXXXXX", dir, name);
+        snprintf(template, sizeof(template), "/tmp/%s.XXXXXX", name);
         if ((*fd = mkostemp(template, O_CLOEXEC)) == -1) {
             PLOG_W("mkstemp('%s')", template);
             return NULL;
@@ -429,12 +370,28 @@ void* files_mapSharedMem(size_t sz, int* fd, const char* name, const char* dir) 
         *fd = -1;
         return NULL;
     }
-    void* ret = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_SHARED, *fd, 0);
+    int mflags = files_getTmpMapFlags(MAP_SHARED, /* nocore= */ true);
+    void* ret = mmap(NULL, sz, PROT_READ | PROT_WRITE, mflags, *fd, 0);
     if (ret == MAP_FAILED) {
         PLOG_W("mmap(sz=%zu, fd=%d)", sz, *fd);
         *fd = -1;
         close(*fd);
         return NULL;
+    }
+    if (posix_madvise(ret, sz, POSIX_MADV_RANDOM) == -1) {
+        PLOG_W("posix_madvise(sz=%zu, POSIX_MADV_RANDOM)", sz);
+    }
+    if (nocore) {
+#if defined(MADV_DONTDUMP)
+        if (madvise(ret, sz, MADV_DONTDUMP) == -1) {
+            PLOG_W("madvise(sz=%zu, MADV_DONTDUMP)", sz);
+        }
+#endif /* defined(MADV_DONTDUMP) */
+#if defined(MADV_NOCORE)
+        if (madvise(ret, sz, MADV_NOCORE) == -1) {
+            PLOG_W("madvise(sz=%zu, MADV_NOCORE)", sz);
+        }
+#endif /* defined(MADV_NOCORE) */
     }
     return ret;
 }

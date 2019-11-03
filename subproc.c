@@ -250,17 +250,19 @@ static bool subproc_PrepareExecv(run_t* run) {
         /* close_stdout= */ run->global->exe.nullifyStdio,
         /* close_stderr= */ run->global->exe.nullifyStdio);
 
-    /* The bitmap structure */
-    if (run->global->feedback.bbFd != -1 &&
-        TEMP_FAILURE_RETRY(dup2(run->global->feedback.bbFd, _HF_BITMAP_FD)) == -1) {
+    /* The bitmap/feedback structure */
+    if (TEMP_FAILURE_RETRY(dup2(run->global->feedback.bbFd, _HF_BITMAP_FD)) == -1) {
         PLOG_E("dup2(%d, _HF_BITMAP_FD=%d)", run->global->feedback.bbFd, _HF_BITMAP_FD);
         return false;
     }
 
     /* The input file to _HF_INPUT_FD */
-    if (run->global->exe.persistent &&
-        TEMP_FAILURE_RETRY(dup2(run->dynamicFileFd, _HF_INPUT_FD)) == -1) {
+    if (TEMP_FAILURE_RETRY(dup2(run->dynamicFileFd, _HF_INPUT_FD)) == -1) {
         PLOG_E("dup2('%d', _HF_INPUT_FD='%d')", run->dynamicFileFd, _HF_INPUT_FD);
+        return false;
+    }
+    if (lseek(_HF_INPUT_FD, 0, SEEK_SET) == (off_t)-1) {
+        PLOG_E("lseek(_HF_INPUT_FD=%d, 0, SEEK_SET)", _HF_INPUT_FD);
         return false;
     }
 
@@ -281,17 +283,10 @@ static bool subproc_PrepareExecv(run_t* run) {
         PLOG_W("sigprocmask(empty_set)");
     }
 
-    if (!run->global->exe.persistent) {
-        if ((run->dynamicFileCopyFd = files_writeBufToTmpFile(
-                 run->global->io.workDir, run->dynamicFile, run->dynamicFileSz, 0)) == -1) {
-            LOG_E("Couldn't save data to a temporary file");
-            return false;
-        }
-        if (run->global->exe.fuzzStdin &&
-            TEMP_FAILURE_RETRY(dup2(run->dynamicFileCopyFd, STDIN_FILENO)) == -1) {
-            PLOG_E("dup2(_HF_INPUT_FD=%d, STDIN_FILENO=%d)", run->dynamicFileCopyFd, STDIN_FILENO);
-            return false;
-        }
+    if (run->global->exe.fuzzStdin &&
+        TEMP_FAILURE_RETRY(dup2(run->dynamicFileFd, STDIN_FILENO)) == -1) {
+        PLOG_E("dup2(_HF_INPUT_FD=%d, STDIN_FILENO=%d)", run->dynamicFileFd, STDIN_FILENO);
+        return false;
     }
 
     return true;

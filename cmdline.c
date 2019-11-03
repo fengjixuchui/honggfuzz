@@ -107,16 +107,16 @@ static void cmdlineHelp(const char* pname, struct custom_option* opts) {
     LOG_HELP(
         " Run the binary over a mutated file chosen from the directory. Disable fuzzing feedback "
         "(static mode):");
-    LOG_HELP_BOLD("  " PROG_NAME " -f input_dir -x -- /usr/bin/djpeg " _HF_FILE_PLACEHOLDER);
+    LOG_HELP_BOLD("  " PROG_NAME " -i input_dir -x -- /usr/bin/djpeg " _HF_FILE_PLACEHOLDER);
     LOG_HELP(" As above, provide input over STDIN:");
-    LOG_HELP_BOLD("  " PROG_NAME " -f input_dir -x -s -- /usr/bin/djpeg");
+    LOG_HELP_BOLD("  " PROG_NAME " -i input_dir -x -s -- /usr/bin/djpeg");
     LOG_HELP(" Use compile-time instrumentation (-fsanitize-coverage=trace-pc-guard,...):");
-    LOG_HELP_BOLD("  " PROG_NAME " -f input_dir -- /usr/bin/djpeg " _HF_FILE_PLACEHOLDER);
+    LOG_HELP_BOLD("  " PROG_NAME " -i input_dir -- /usr/bin/djpeg " _HF_FILE_PLACEHOLDER);
     LOG_HELP(" Use persistent mode w/o instrumentation:");
-    LOG_HELP_BOLD("  " PROG_NAME " -f input_dir -P -x -- /usr/bin/djpeg_persistent_mode");
+    LOG_HELP_BOLD("  " PROG_NAME " -i input_dir -P -x -- /usr/bin/djpeg_persistent_mode");
     LOG_HELP(" Use persistent mode and compile-time (-fsanitize-coverage=trace-pc-guard,...) "
              "instrumentation:");
-    LOG_HELP_BOLD("  " PROG_NAME " -f input_dir -P -- /usr/bin/djpeg_persistent_mode");
+    LOG_HELP_BOLD("  " PROG_NAME " -i input_dir -P -- /usr/bin/djpeg_persistent_mode");
 #if defined(_HF_ARCH_LINUX)
     LOG_HELP(
         " Run the binary with dynamically generate inputs, maximize total no. of instructions:");
@@ -193,12 +193,6 @@ static bool cmdlineVerify(honggfuzz_t* hfuzz) {
         return false;
     }
 
-    if (hfuzz->exe.fuzzStdin && hfuzz->exe.persistent) {
-        LOG_E(
-            "Stdin fuzzing (-s) and persistent fuzzing (-P) cannot be specified at the same time");
-        return false;
-    }
-
     if (hfuzz->threads.threadsMax >= _HF_THREAD_MAX) {
         LOG_E("Too many fuzzing threads specified %zu (>= _HF_THREAD_MAX (%u))",
             hfuzz->threads.threadsMax, _HF_THREAD_MAX);
@@ -254,6 +248,7 @@ bool cmdlineParse(int argc, char* argv[], honggfuzz_t* hfuzz) {
         .io =
             {
                 .inputDir = NULL,
+                .outputDir = NULL,
                 .inputDirPtr = NULL,
                 .fileCnt = 0,
                 .fileCntDone = false,
@@ -261,11 +256,11 @@ bool cmdlineParse(int argc, char* argv[], honggfuzz_t* hfuzz) {
                 .fileExtn = "fuzz",
                 .workDir = NULL,
                 .crashDir = NULL,
-                .covDirAll = NULL,
                 .covDirNew = NULL,
                 .saveUnique = true,
                 .dynfileqCnt = 0U,
                 .dynfileq_mutex = PTHREAD_RWLOCK_INITIALIZER,
+                .dynfileqCurrent = NULL,
             },
         .exe =
             {
@@ -320,6 +315,8 @@ bool cmdlineParse(int argc, char* argv[], honggfuzz_t* hfuzz) {
                 .monitorSIGABRT = true,
 #endif
                 .only_printable = false,
+                .minimize = false,
+                .switchingToFDM = false,
             },
         .sanitizer =
             {
@@ -400,9 +397,11 @@ bool cmdlineParse(int argc, char* argv[], honggfuzz_t* hfuzz) {
     // clang-format off
     struct custom_option custom_opts[] = {
         { { "help", no_argument, NULL, 'h' }, "Help plz.." },
-        { { "input", required_argument, NULL, 'f' }, "Path to a directory containing initial file corpus" },
+        { { "input", required_argument, NULL, 'i' }, "Path to a directory containing initial file corpus" },
+        { { "output", required_argument, NULL, 0x601 }, "Output data (new dynamic coverage corpus, or the minimized coverage corpus) is written to this directory (default: input directory is used)" },
         { { "persistent", no_argument, NULL, 'P' }, "Enable persistent fuzzing (use hfuzz_cc/hfuzz-clang to compile code). This will be auto-detected!!!" },
         { { "instrument", no_argument, NULL, 'z' }, "*DEFAULT-MODE-BY-DEFAULT* Enable compile-time instrumentation (use hfuzz_cc/hfuzz-clang to compile code)" },
+        { { "minimize", no_argument, NULL, 'M' }, "Minimize the input corpus. It will most likely delete some corpus files (from the --input directory) if no --output is used!" },
         { { "noinst", no_argument, NULL, 'x' }, "Static mode only, disable any instrumentation (hw/sw) feedback" },
         { { "keep_output", no_argument, NULL, 'Q' }, "Don't close children's stdin, stdout, stderr; can be noisy" },
         { { "timeout", required_argument, NULL, 't' }, "Timeout in seconds (default: 10)" },
@@ -417,7 +416,7 @@ bool cmdlineParse(int argc, char* argv[], honggfuzz_t* hfuzz) {
         { { "extension", required_argument, NULL, 'e' }, "Input file extension (e.g. 'swf'), (default: 'fuzz')" },
         { { "workspace", required_argument, NULL, 'W' }, "Workspace directory to save crashes & runtime files (default: '.')" },
         { { "crashdir", required_argument, NULL, 0x600 }, "Directory where crashes are saved to (default: workspace directory)" },
-        { { "covdir_all", required_argument, NULL, 0x601 }, "Coverage is written to a separate directory (default: input directory)" },
+        { { "covdir_all", required_argument, NULL, 0x601 }, "** DEPRECATED ** use --output" },
         { { "covdir_new", required_argument, NULL, 0x602 }, "New coverage (beyond the dry-run fuzzing phase) is written to this separate directory" },
         { { "dict", required_argument, NULL, 'w' }, "Dictionary file. Format:http://llvm.org/docs/LibFuzzer.html#dictionaries" },
         { { "stackhash_bl", required_argument, NULL, 'B' }, "Stackhashes blacklist file (one entry per line)" },
@@ -442,7 +441,7 @@ bool cmdlineParse(int argc, char* argv[], honggfuzz_t* hfuzz) {
         { { "exit_upon_crash", no_argument, NULL, 0x107 }, "Exit upon seeing the first crash (default: false)" },
         { { "socket_fuzzer", no_argument, NULL, 0x10B }, "Instrument external fuzzer via socket" },
         { { "netdriver", no_argument, NULL, 0x10C }, "Use netdriver (libhfnetdriver/). In most cases it will be autodetected through a binary signature" },
-        { { "only_printable", no_argument, NULL, 'o' }, "Only generate printable inputs" },
+        { { "only_printable", no_argument, NULL, 0x10D }, "Only generate printable inputs" },
 
 #if defined(_HF_ARCH_LINUX)
         { { "linux_symbols_bl", required_argument, NULL, 0x504 }, "Symbols blacklist filter file (one entry per line)" },
@@ -479,7 +478,7 @@ bool cmdlineParse(int argc, char* argv[], honggfuzz_t* hfuzz) {
     int opt_index = 0;
     for (;;) {
         int c = getopt_long(
-            argc, argv, "-?hQvVsuPxf:dqe:W:r:c:F:t:R:n:N:l:p:g:E:w:B:zTSo", opts, &opt_index);
+            argc, argv, "-?hQvVsuPxf:i:dqe:W:r:c:F:t:R:n:N:l:p:g:E:w:B:zMTS", opts, &opt_index);
         if (c < 0) break;
 
         switch (c) {
@@ -487,11 +486,9 @@ bool cmdlineParse(int argc, char* argv[], honggfuzz_t* hfuzz) {
             case '?':
                 cmdlineUsage(argv[0], custom_opts);
                 break;
-            case 'f':
+            case 'i':
+            case 'f': /* Synonym for -i, stands for -f(iles) */
                 hfuzz->io.inputDir = optarg;
-                if (hfuzz->io.covDirAll == NULL) {
-                    hfuzz->io.covDirAll = optarg;
-                }
                 break;
             case 'x':
                 hfuzz->feedback.dynFileMethod = _HF_DYNFILE_NONE;
@@ -530,7 +527,7 @@ bool cmdlineParse(int argc, char* argv[], honggfuzz_t* hfuzz) {
                 hfuzz->io.crashDir = optarg;
                 break;
             case 0x601:
-                hfuzz->io.covDirAll = optarg;
+                hfuzz->io.outputDir = optarg;
                 break;
             case 0x602:
                 hfuzz->io.covDirNew = optarg;
@@ -546,16 +543,19 @@ bool cmdlineParse(int argc, char* argv[], honggfuzz_t* hfuzz) {
                 break;
             case 0x10B:
                 hfuzz->socketFuzzer.enabled = true;
-                hfuzz->timing.tmOut = 0;  // Disable process timeout checks
+                hfuzz->timing.tmOut = 0; /* Disable process timeout checks */
                 break;
             case 0x10C:
                 hfuzz->exe.netDriver = true;
                 break;
-            case 'o':
+            case 0x10D:
                 hfuzz->cfg.only_printable = true;
                 break;
             case 'z':
                 hfuzz->feedback.dynFileMethod |= _HF_DYNFILE_SOFT;
+                break;
+            case 'M':
+                hfuzz->cfg.minimize = true;
                 break;
             case 'F':
                 hfuzz->mutate.maxFileSz = strtoul(optarg, NULL, 0);
@@ -711,10 +711,6 @@ bool cmdlineParse(int argc, char* argv[], honggfuzz_t* hfuzz) {
     }
 
     display_createTargetStr(hfuzz);
-
-    sigemptyset(&hfuzz->exe.waitSigSet);
-    sigaddset(&hfuzz->exe.waitSigSet, SIGIO);   /* Persistent socket data */
-    sigaddset(&hfuzz->exe.waitSigSet, SIGUSR1); /* Ping from the signal thread */
 
     LOG_I("cmdline:'%s', bin:'%s' inputDir:'%s', fuzzStdin:%s, mutationsPerRun:%u, "
           "externalCommand:'%s', timeout:%ld, mutationsMax:%zu, threadsMax:%zu",

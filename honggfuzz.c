@@ -47,6 +47,7 @@
 #include "subproc.h"
 
 static int sigReceived = 0;
+static bool clearWin = false;
 
 /*
  * CygWin/MinGW incorrectly copies stack during fork(), so we need to keep some
@@ -72,10 +73,11 @@ static void sigHandler(int sig) {
         }
         return;
     }
-    /* Do nothing with pings from the main thread */
-    if (sig == SIGUSR1) {
+    if (sig == SIGWINCH) {
+        ATOMIC_SET(clearWin, true);
         return;
     }
+
     /* It's handled in the signal thread */
     if (sig == SIGCHLD) {
         return;
@@ -140,7 +142,7 @@ static void setupSignalsPreThreads(void) {
     /* Let the signal thread catch SIGCHLD */
     sigaddset(&ss, SIGCHLD);
     /* This is checked for via sigwaitinfo/sigtimedwait */
-    sigaddset(&ss, SIGUSR1);
+    sigaddset(&ss, SIGWINCH);
     if (sigprocmask(SIG_SETMASK, &ss, NULL) != 0) {
         PLOG_F("sigprocmask(SIG_SETMASK)");
     }
@@ -162,11 +164,11 @@ static void setupSignalsPreThreads(void) {
     if (sigaction(SIGALRM, &sa, NULL) == -1) {
         PLOG_F("sigaction(SIGQUIT) failed");
     }
-    if (sigaction(SIGUSR1, &sa, NULL) == -1) {
-        PLOG_F("sigaction(SIGUSR1) failed");
-    }
     if (sigaction(SIGCHLD, &sa, NULL) == -1) {
         PLOG_F("sigaction(SIGCHLD) failed");
+    }
+    if (sigaction(SIGWINCH, &sa, NULL) == -1) {
+        PLOG_F("sigaction(SIGWINCH) failed");
     }
 }
 
@@ -178,6 +180,7 @@ static void setupSignalsMainThread(void) {
     sigaddset(&ss, SIGINT);
     sigaddset(&ss, SIGQUIT);
     sigaddset(&ss, SIGALRM);
+    sigaddset(&ss, SIGWINCH);
     if (pthread_sigmask(SIG_UNBLOCK, &ss, NULL) != 0) {
         PLOG_F("pthread_sigmask(SIG_UNBLOCK)");
     }
@@ -192,19 +195,30 @@ static void printSummary(honggfuzz_t* hfuzz) {
     uint64_t guardNb = ATOMIC_GET(hfuzz->feedback.feedbackMap->guardNb);
     uint64_t branch_percent_cov =
         guardNb ? ((100 * ATOMIC_GET(hfuzz->linux.hwCnts.softCntEdge)) / guardNb) : 0;
+    struct rusage usage;
+    if (getrusage(RUSAGE_CHILDREN, &usage)) {
+        PLOG_W("getrusage  failed");
+        usage.ru_maxrss = 0;  // 0 means something went wrong with rusage
+    }
+#ifdef _HF_ARCH_DARWIN
+    usage.ru_maxrss >>= 20;
+#else
+    usage.ru_maxrss >>= 10;
+#endif
     LOG_I("Summary iterations:%zu time:%" PRIu64 " speed:%" PRIu64 " "
           "crashes_count:%zu timeout_count:%zu new_units_added:%zu "
-          "slowest_unit_ms:%" PRId64 " guard_nb:%" PRIu64 " branch_coverage_percent:%" PRIu64,
+          "slowest_unit_ms:%" PRId64 " guard_nb:%" PRIu64 " branch_coverage_percent:%" PRIu64 " "
+          "peak_rss_mb:%lu",
         hfuzz->cnts.mutationsCnt, elapsed_sec, exec_per_sec, hfuzz->cnts.crashesCnt,
         hfuzz->cnts.timeoutedCnt, hfuzz->io.newUnitsAdded,
         hfuzz->timing.timeOfLongestUnitInMilliseconds, hfuzz->feedback.feedbackMap->guardNb,
-        branch_percent_cov);
+        branch_percent_cov, usage.ru_maxrss);
 }
 
 static void pingThreads(honggfuzz_t* hfuzz) {
     for (size_t i = 0; i < hfuzz->threads.threadsMax; i++) {
-        if (pthread_kill(hfuzz->threads.threads[i], SIGUSR1) != 0 && errno != EINTR) {
-            PLOG_W("pthread_kill(thread=%zu, SIGUSR1)", i);
+        if (pthread_kill(hfuzz->threads.threads[i], SIGCHLD) != 0 && errno != EINTR) {
+            PLOG_W("pthread_kill(thread=%zu, SIGCHLD)", i);
         }
     }
 }
@@ -220,20 +234,65 @@ static void* signalThread(void* arg) {
     }
 
     for (;;) {
-        int sig;
-        if (sigwait(&ss, &sig) != 0 && errno != EINTR) {
+        int sig = 0;
+        errno = 0;
+        int ret = sigwait(&ss, &sig);
+        if (ret == EINTR) {
+            continue;
+        }
+        if (ret != 0 && errno == EINTR) {
+            continue;
+        }
+        if (ret != 0) {
             PLOG_F("sigwait(SIGCHLD)");
         }
         if (fuzz_isTerminating()) {
             break;
         }
-
         if (sig == SIGCHLD) {
             pingThreads(hfuzz);
         }
     }
 
     return NULL;
+}
+
+static void mainThreadLoop(honggfuzz_t* hfuzz) {
+    setupSignalsMainThread();
+    setupMainThreadTimer();
+
+    for (;;) {
+        if (hfuzz->display.useScreen) {
+            if (ATOMIC_XCHG(clearWin, false)) {
+                display_clear();
+            }
+            display_display(hfuzz);
+        }
+        if (ATOMIC_GET(sigReceived) > 0) {
+            LOG_I("Signal %d (%s) received, terminating", ATOMIC_GET(sigReceived),
+                strsignal(ATOMIC_GET(sigReceived)));
+            break;
+        }
+        if (ATOMIC_GET(hfuzz->threads.threadsFinished) >= hfuzz->threads.threadsMax) {
+            break;
+        }
+        if (hfuzz->timing.runEndTime > 0 && (time(NULL) > hfuzz->timing.runEndTime)) {
+            LOG_I("Maximum run time reached, terminating");
+            break;
+        }
+        pingThreads(hfuzz);
+        pause();
+    }
+
+    fuzz_setTerminating();
+
+    for (;;) {
+        if (ATOMIC_GET(hfuzz->threads.threadsFinished) >= hfuzz->threads.threadsMax) {
+            break;
+        }
+        pingThreads(hfuzz);
+        util_sleepForMSec(50); /* 50ms */
+    }
 }
 
 int main(int argc, char** argv) {
@@ -254,6 +313,20 @@ int main(int argc, char** argv) {
     if (cmdlineParse(argc, myargs, &hfuzz) == false) {
         LOG_F("Parsing of the cmd-line arguments failed");
     }
+    if (hfuzz.io.inputDir && access(hfuzz.io.inputDir, R_OK) == -1) {
+        PLOG_F("Input directory '%s' is not readable", hfuzz.io.inputDir);
+    }
+    if (hfuzz.io.outputDir && access(hfuzz.io.outputDir, W_OK) == -1) {
+        PLOG_F("Output directory '%s' is not writeable", hfuzz.io.outputDir);
+    }
+    if (hfuzz.cfg.minimize) {
+        LOG_I("Minimization mode enabled. Setting number of threads to 1");
+        hfuzz.threads.threadsMax = 1;
+    }
+
+    sigemptyset(&hfuzz.exe.waitSigSet);
+    sigaddset(&hfuzz.exe.waitSigSet, SIGIO);   /* Persistent socket data */
+    sigaddset(&hfuzz.exe.waitSigSet, SIGCHLD); /* Ping from the signal thread */
 
     if (hfuzz.display.useScreen) {
         display_init();
@@ -286,12 +359,9 @@ int main(int argc, char** argv) {
         LOG_F("Couldn't parse symbols whitelist file ('%s')", hfuzzl.symsWlFile);
     }
 
-    if (hfuzz.feedback.dynFileMethod != _HF_DYNFILE_NONE) {
-        if (!(hfuzz.feedback.feedbackMap = files_mapSharedMem(
-                  sizeof(feedback_t), &hfuzz.feedback.bbFd, "hfuzz-feedback", hfuzz.io.workDir))) {
-            LOG_F("files_mapSharedMem(sz=%zu, dir='%s') failed", sizeof(feedback_t),
-                hfuzz.io.workDir);
-        }
+    if (!(hfuzz.feedback.feedbackMap = files_mapSharedMem(
+              sizeof(feedback_t), &hfuzz.feedback.bbFd, "hfuzz-feedback", /* nocore= */ true))) {
+        LOG_F("files_mapSharedMem(sz=%zu, dir='%s') failed", sizeof(feedback_t), hfuzz.io.workDir);
     }
 
     setupRLimits();
@@ -303,42 +373,14 @@ int main(int argc, char** argv) {
         LOG_F("Couldn't start the signal thread");
     }
 
-    setupSignalsMainThread();
-    setupMainThreadTimer();
-
-    for (;;) {
-        if (hfuzz.display.useScreen) {
-            display_display(&hfuzz);
-        }
-        if (ATOMIC_GET(sigReceived) > 0) {
-            LOG_I("Signal %d (%s) received, terminating", ATOMIC_GET(sigReceived),
-                strsignal(ATOMIC_GET(sigReceived)));
-            break;
-        }
-        if (ATOMIC_GET(hfuzz.threads.threadsFinished) >= hfuzz.threads.threadsMax) {
-            break;
-        }
-        if (hfuzz.timing.runEndTime > 0 && (time(NULL) > hfuzz.timing.runEndTime)) {
-            LOG_I("Maximum run time reached, terminating");
-            break;
-        }
-        pingThreads(&hfuzz);
-        pause();
-    }
-
-    fuzz_setTerminating();
-
-    for (;;) {
-        if (ATOMIC_GET(hfuzz.threads.threadsFinished) >= hfuzz.threads.threadsMax) {
-            break;
-        }
-        pingThreads(&hfuzz);
-        util_sleepForMSec(50); /* 50ms */
-    }
+    mainThreadLoop(&hfuzz);
 
     /* Clean-up global buffers */
     if (hfuzz.feedback.blacklist) {
         free(hfuzz.feedback.blacklist);
+    }
+    if (hfuzz.mutate.dictionaryCnt) {
+        input_freeDictionary(&hfuzz);
     }
 #if defined(_HF_ARCH_LINUX)
     if (hfuzz.linux.symsBl) {

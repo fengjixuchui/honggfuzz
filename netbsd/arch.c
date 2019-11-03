@@ -77,15 +77,11 @@ bool arch_launchChild(run_t* run) {
 #define ARGS_MAX 512
     const char* args[ARGS_MAX + 2];
     char argData[PATH_MAX];
-
-    char inputFile[PATH_MAX];
-    snprintf(inputFile, sizeof(inputFile), "/dev/fd/%d", run->dynamicFileCopyFd);
+    const char inputFile[] = "/dev/fd/" HF_XSTR(_HF_INPUT_FD);
 
     int x = 0;
     for (x = 0; x < ARGS_MAX && x < run->global->exe.argc; x++) {
-        if (run->global->exe.persistent || run->global->exe.fuzzStdin) {
-            args[x] = run->global->exe.cmdline[x];
-        } else if (!strcmp(run->global->exe.cmdline[x], _HF_FILE_PLACEHOLDER)) {
+        if (!strcmp(run->global->exe.cmdline[x], _HF_FILE_PLACEHOLDER)) {
             args[x] = inputFile;
         } else if (strstr(run->global->exe.cmdline[x], _HF_FILE_PLACEHOLDER)) {
             const char* off = strstr(run->global->exe.cmdline[x], _HF_FILE_PLACEHOLDER);
@@ -189,14 +185,14 @@ void arch_reapChild(run_t* run) {
                 PLOG_F("poll(fd=%d)", run->persistentSock);
             }
         } else {
-            /* Return with SIGIO, SIGCHLD and with SIGUSR1 */
+            /* Return with SIGIO, SIGCHLD */
             const struct timespec ts = {
                 .tv_sec = 0ULL,
                 .tv_nsec = (1000ULL * 1000ULL * 250ULL),
             };
             int sig = sigtimedwait(&run->global->exe.waitSigSet, NULL, &ts /* 0.25s */);
             if (sig == -1 && (errno != EAGAIN && errno != EINTR)) {
-                PLOG_F("sigtimedwait(SIGIO|SIGCHLD|SIGUSR1)");
+                PLOG_F("sigtimedwait(SIGIO|SIGCHLD)");
             }
         }
 

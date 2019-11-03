@@ -46,16 +46,10 @@ ifeq ($(OS)$(findstring Microsoft,$(KERNEL)),Linux) # matches Linux but excludes
                    -funroll-loops \
                    -D_FILE_OFFSET_BITS=64
     ARCH_LDFLAGS := -L/usr/local/include \
-                    -pthread -lunwind-ptrace -lunwind-generic -lbfd -lopcodes -lrt -ldl
+                    -pthread -lunwind-ptrace -lunwind-generic -lbfd -lopcodes -lrt -ldl -lm
     ARCH_SRCS := $(sort $(wildcard linux/*.c))
     LIBS_CFLAGS += -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0
 
-    ifeq ("$(wildcard /usr/include/bfd.h)","")
-        WARN_LIBRARY += binutils-devel
-    endif
-    ifeq ("$(wildcard /usr/include/libunwind-ptrace.h)","")
-        WARN_LIBRARY += libunwind-devel/libunwind8-devel
-    endif
     ifeq ("$(wildcard /usr/local/include/intel-pt.h)","/usr/local/include/intel-pt.h")
         ARCH_CFLAGS += -D_HF_LINUX_INTEL_PT_LIB
         ARCH_CFLAGS += -I/usr/local/include
@@ -64,13 +58,6 @@ ifeq ($(OS)$(findstring Microsoft,$(KERNEL)),Linux) # matches Linux but excludes
     ifeq ("$(wildcard /usr/include/intel-pt.h)","/usr/include/intel-pt.h")
         ARCH_CFLAGS += -D_HF_LINUX_INTEL_PT_LIB
         ARCH_LDFLAGS += -lipt
-    endif
-    ifdef WARN_LIBRARY
-        $(info --------------------------------------------------------)
-        $(info Libraries which are most likely missing on your OS.     )
-        $(info This can result in linking/compilation errors.          )
-        $(info > $(WARN_LIBRARY))
-        $(info --------------------------------------------------------)
     endif
     # OS Linux
 else ifeq ($(OS),Darwin)
@@ -145,7 +132,7 @@ else ifeq ($(OS),NetBSD)
                    -Wextra -Wno-override-init \
                    -funroll-loops -D_KERNTYPES
     ARCH_LDFLAGS := -L/usr/local/lib -L/usr/pkg/lib \
-                    -pthread -lcapstone -lrt \
+                    -pthread -lcapstone -lrt -lm \
                     -Wl,--rpath=/usr/pkg/lib
 
     # OS NetBSD
@@ -157,7 +144,12 @@ else
                    -Wextra -Wno-initializer-overrides -Wno-override-init \
                    -Wno-unknown-warning-option -Wno-unknown-pragmas \
                    -funroll-loops
-    ARCH_LDFLAGS := -pthread -L/usr/local/lib
+ifeq ($(OS),OpenBSD)
+    ARCH_LDFLAGS := -L/usr/local/lib -pthread -lm
+else
+    ARCH_LDFLAGS := -L/usr/local/lib -pthread -lrt -lm
+    # OS OpenBSD
+endif
     # OS Posix
 endif
 
@@ -202,9 +194,8 @@ ifeq ($(DEBUG),true)
 endif
 
 # Control Android builds
-ANDROID_API           ?= android-26
+ANDROID_API           ?= android-26 # Minimal working version is android-23
 ANDROID_DEBUG_ENABLED ?= false
-ANDROID_CLANG         ?= true
 ANDROID_APP_ABI       ?= armeabi-v7a
 ANDROID_SKIP_CLEAN    ?= false
 NDK_BUILD_ARGS :=
@@ -221,42 +212,28 @@ ifeq ($(ANDROID_SKIP_CLEAN),true)
   NDK_BUILD_ARGS += NDK_APP.local.cleaned_binaries=true
 endif
 
-ifeq ($(ANDROID_CLANG),true)
-  ANDROID_NDK_TOOLCHAIN_VER := clang
-  # clang works only against APIs >= 23
-  ifeq ($(ANDROID_APP_ABI),$(filter $(ANDROID_APP_ABI),armeabi armeabi-v7a))
-    ANDROID_NDK_TOOLCHAIN ?= arm-linux-androideabi-clang
-    ANDROID_ARCH_CPU := arm
-  else ifeq ($(ANDROID_APP_ABI),$(filter $(ANDROID_APP_ABI),x86))
-    ANDROID_NDK_TOOLCHAIN ?= x86-clang
-    ANDROID_ARCH_CPU := x86
-  else ifeq ($(ANDROID_APP_ABI),$(filter $(ANDROID_APP_ABI),arm64-v8a))
-    ANDROID_NDK_TOOLCHAIN ?= aarch64-linux-android-clang
-    ANDROID_ARCH_CPU := arm64
-  else ifeq ($(ANDROID_APP_ABI),$(filter $(ANDROID_APP_ABI),x86_64))
-    ANDROID_NDK_TOOLCHAIN ?= x86_64-clang
-    ANDROID_ARCH_CPU := x86_64
-  else
-    $(error Unsuported / Unknown APP_API '$(ANDROID_APP_ABI)')
-  endif
+ANDROID_NDK_TOOLCHAIN_VER := clang
+# clang works only against APIs >= 23
+ifeq ($(ANDROID_APP_ABI),$(filter $(ANDROID_APP_ABI),armeabi-v7a))
+  ANDROID_NDK_TOOLCHAIN ?= arm-linux-androideabi-clang
+  ANDROID_NDK_COMPILER_PREFIX := armv7a-linux-androideabi
+  ANDROID_ARCH_CPU := arm
+else ifeq ($(ANDROID_APP_ABI),$(filter $(ANDROID_APP_ABI),x86))
+  ANDROID_NDK_TOOLCHAIN ?= x86-clang
+  ANDROID_NDK_COMPILER_PREFIX := i686-linux-android
+  ANDROID_ARCH_CPU := x86
+else ifeq ($(ANDROID_APP_ABI),$(filter $(ANDROID_APP_ABI),arm64-v8a))
+  ANDROID_NDK_TOOLCHAIN ?= aarch64-linux-android-clang
+  ANDROID_NDK_COMPILER_PREFIX := aarch64-linux-android
+  ANDROID_ARCH_CPU := arm64
+else ifeq ($(ANDROID_APP_ABI),$(filter $(ANDROID_APP_ABI),x86_64))
+  ANDROID_NDK_TOOLCHAIN ?= x86_64-clang
+  ANDROID_NDK_COMPILER_PREFIX := x86_64-linux-android
+  ANDROID_ARCH_CPU := x86_64
 else
-  ANDROID_NDK_TOOLCHAIN_VER := 4.9
-  ifeq ($(ANDROID_APP_ABI),$(filter $(ANDROID_APP_ABI),armeabi armeabi-v7a))
-    ANDROID_NDK_TOOLCHAIN ?= arm-linux-androideabi-4.9
-    ANDROID_ARCH_CPU := arm
-  else ifeq ($(ANDROID_APP_ABI),$(filter $(ANDROID_APP_ABI),x86))
-    ANDROID_NDK_TOOLCHAIN ?= x86-4.9
-    ANDROID_ARCH_CPU := x86
-  else ifeq ($(ANDROID_APP_ABI),$(filter $(ANDROID_APP_ABI),arm64-v8a))
-    ANDROID_NDK_TOOLCHAIN ?= aarch64-linux-android-4.9
-    ANDROID_ARCH_CPU := arm64
-  else ifeq ($(ANDROID_APP_ABI),$(filter $(ANDROID_APP_ABI),x86_64))
-    ANDROID_NDK_TOOLCHAIN ?= x86_64-4.9
-    ANDROID_ARCH_CPU := x86_64
-  else
-    $(error Unsuported / Unknown APP_API '$(ANDROID_APP_ABI)')
-  endif
+   $(error Unsuported / Unknown APP_API '$(ANDROID_APP_ABI)')
 endif
+
 
 SUBDIR_ROOTS := linux mac netbsd posix libhfuzz libhfcommon libhfnetdriver
 DIRS := . $(shell find $(SUBDIR_ROOTS) -type d)
@@ -322,23 +299,21 @@ depend: all
 .PHONY: android
 android:
 	$(info ***************************************************************)
-	$(info *                 Use Android NDK 15 or newer                 *)
+	$(info *                 Use Android NDK 20 or newer                 *)
 	$(info ***************************************************************)
-	@ANDROID_API=$(ANDROID_API) third_party/android/scripts/compile-libunwind.sh \
+	@ANDROID_API=$(ANDROID_API) ANDROID_NDK_COMPILER_PREFIX=$(ANDROID_NDK_COMPILER_PREFIX) third_party/android/scripts/compile-libunwind.sh \
 	third_party/android/libunwind $(ANDROID_ARCH_CPU)
 
-	@ANDROID_API=$(ANDROID_API) third_party/android/scripts/compile-capstone.sh \
+	@ANDROID_API=$(ANDROID_API) ANDROID_NDK_COMPILER_PREFIX=$(ANDROID_NDK_COMPILER_PREFIX) third_party/android/scripts/compile-capstone.sh \
 	third_party/android/capstone $(ANDROID_ARCH_CPU)
 
-  ifeq ($(ANDROID_CLANG),true)
-		@ANDROID_API=$(ANDROID_API) third_party/android/scripts/compile-libBlocksRuntime.sh \
-		third_party/android/libBlocksRuntime $(ANDROID_ARCH_CPU)
-  endif
+	@ANDROID_API=$(ANDROID_API) ANDROID_NDK_COMPILER_PREFIX=$(ANDROID_NDK_COMPILER_PREFIX) third_party/android/scripts/compile-libBlocksRuntime.sh \
+	third_party/android/libBlocksRuntime $(ANDROID_ARCH_CPU)
 
 	ndk-build NDK_PROJECT_PATH=. APP_BUILD_SCRIPT=./android/Android.mk \
     APP_PLATFORM=$(ANDROID_API) APP_ABI=$(ANDROID_APP_ABI) \
     NDK_TOOLCHAIN=$(ANDROID_NDK_TOOLCHAIN) NDK_TOOLCHAIN_VERSION=$(ANDROID_NDK_TOOLCHAIN_VER) \
-    $(NDK_BUILD_ARGS) APP_MODULES='honggfuzz hfuzz'
+    $(NDK_BUILD_ARGS) APP_MODULES='honggfuzz hfuzz hfnetdriver'
 
 # Loop all ABIs and pass-through flags since visibility is lost due to sub-process
 .PHONY: android-all
@@ -347,8 +322,8 @@ android-all:
 	$(MAKE) clean
 	@echo ""
 
-	@for abi in armeabi armeabi-v7a arm64-v8a x86 x86_64; do \
-	  ANDROID_APP_ABI=$$abi ANDROID_SKIP_CLEAN=true ANDROID_CLANG=$(ANDROID_CLANG) \
+	for abi in armeabi-v7a arm64-v8a x86 x86_64; do \
+	  ANDROID_APP_ABI=$$abi ANDROID_SKIP_CLEAN=true \
 	  ANDROID_API=$(ANDROID_API) ANDROID_DEBUG_ENABLED=$(ANDROID_DEBUG_ENABLED) \
 	  $(MAKE) android || { \
 	    echo "Recursive make failed"; exit 1; }; \
@@ -393,9 +368,9 @@ fuzz.o: subproc.h
 honggfuzz.o: cmdline.h honggfuzz.h libhfcommon/util.h libhfcommon/common.h
 honggfuzz.o: display.h fuzz.h input.h libhfcommon/files.h
 honggfuzz.o: libhfcommon/common.h libhfcommon/log.h socketfuzzer.h subproc.h
-input.o: input.h honggfuzz.h libhfcommon/util.h libhfcommon/common.h
-input.o: libhfcommon/files.h libhfcommon/common.h mangle.h subproc.h
-input.o: libhfcommon/log.h
+input.o: input.h honggfuzz.h libhfcommon/util.h fuzz.h libhfcommon/common.h
+input.o: libhfcommon/files.h libhfcommon/common.h libhfcommon/log.h mangle.h
+input.o: subproc.h
 mangle.o: mangle.h honggfuzz.h libhfcommon/util.h input.h
 mangle.o: libhfcommon/common.h libhfcommon/log.h
 report.o: report.h honggfuzz.h libhfcommon/util.h libhfcommon/common.h
@@ -429,6 +404,7 @@ libhfuzz/fetch.o: libhfuzz/fetch.h honggfuzz.h libhfcommon/util.h
 libhfuzz/fetch.o: libhfcommon/common.h libhfcommon/files.h
 libhfuzz/fetch.o: libhfcommon/common.h libhfcommon/log.h
 libhfuzz/instrument.o: libhfuzz/instrument.h honggfuzz.h libhfcommon/util.h
+libhfuzz/instrument.o: libhfcommon/common.h libhfcommon/files.h
 libhfuzz/instrument.o: libhfcommon/common.h libhfcommon/log.h
 libhfuzz/linux.o: libhfcommon/common.h libhfcommon/files.h
 libhfuzz/linux.o: libhfcommon/common.h libhfcommon/log.h libhfcommon/ns.h
@@ -464,7 +440,7 @@ netbsd/arch.o: libhfcommon/common.h libhfcommon/files.h libhfcommon/common.h
 netbsd/arch.o: libhfcommon/log.h libhfcommon/ns.h netbsd/trace.h subproc.h
 netbsd/trace.o: netbsd/trace.h honggfuzz.h libhfcommon/util.h
 netbsd/trace.o: libhfcommon/common.h libhfcommon/files.h libhfcommon/common.h
-netbsd/trace.o: libhfcommon/log.h netbsd/unwind.h socketfuzzer.h subproc.h
+netbsd/trace.o: libhfcommon/log.h netbsd/unwind.h subproc.h
 netbsd/unwind.o: netbsd/unwind.h honggfuzz.h libhfcommon/util.h
 netbsd/unwind.o: libhfcommon/common.h libhfcommon/log.h
 posix/arch.o: arch.h honggfuzz.h libhfcommon/util.h fuzz.h
