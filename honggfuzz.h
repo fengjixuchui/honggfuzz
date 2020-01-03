@@ -38,7 +38,7 @@
 #include "libhfcommon/util.h"
 
 #define PROG_NAME "honggfuzz"
-#define PROG_VERSION "1.9"
+#define PROG_VERSION "2.0"
 
 /* Name of the template which will be replaced with the proper name of the file */
 #define _HF_FILE_PLACEHOLDER "___FILE___"
@@ -62,7 +62,7 @@
 #define _HF_VERIFIER_ITER 5
 
 /* Size (in bytes) for report data to be stored in stack before written to file */
-#define _HF_REPORT_SIZE 8192
+#define _HF_REPORT_SIZE 32768
 
 /* Perf bitmap size */
 #define _HF_PERF_BITMAP_SIZE_16M (1024U * 1024U * 16U)
@@ -120,10 +120,10 @@ typedef struct {
 
 /* Memory map struct */
 typedef struct __attribute__((packed)) {
-    uint64_t start;          // region start addr
-    uint64_t end;            // region end addr
-    uint64_t base;           // region base addr
-    char mapName[NAME_MAX];  // bin/DSO name
+    uint64_t start;         // region start addr
+    uint64_t end;           // region end addr
+    uint64_t base;          // region base addr
+    char module[NAME_MAX];  // bin/DSO name
     uint64_t bbCnt;
     uint64_t newBBCnt;
 } memMap_t;
@@ -194,7 +194,7 @@ typedef struct {
         const char* fileExtn;
         bool fileCntDone;
         size_t newUnitsAdded;
-        const char* workDir;
+        char workDir[PATH_MAX];
         const char* crashDir;
         const char* covDirNew;
         bool saveUnique;
@@ -202,6 +202,7 @@ typedef struct {
         pthread_rwlock_t dynfileq_mutex;
         struct dynfile_t* dynfileqCurrent;
         TAILQ_HEAD(dyns_t, dynfile_t) dynfileq;
+        bool exportFeedback;
     } io;
     struct {
         int argc;
@@ -218,7 +219,8 @@ typedef struct {
         uint64_t dataLimit;
         uint64_t coreLimit;
         bool clearEnv;
-        char* envs[128];
+        char* env_ptrs[128];
+        char env_vals[128][4096];
         sigset_t waitSigSet;
     } exe;
     struct {
@@ -247,7 +249,6 @@ typedef struct {
         bool exitUponCrash;
         const char* reportFile;
         pthread_mutex_t report_mutex;
-        bool monitorSIGABRT;
         size_t dynFileIterExpire;
         bool only_printable;
         bool minimize;
@@ -255,6 +256,7 @@ typedef struct {
     } cfg;
     struct {
         bool enable;
+        bool del_report;
     } sanitizer;
     struct {
         fuzzState_t state;
@@ -287,7 +289,6 @@ typedef struct {
         uint64_t dynamicCutOffAddr;
         bool disableRandomization;
         void* ignoreAddr;
-        size_t numMajorFrames;
         const char* symsBlFile;
         char** symsBl;
         size_t symsBlCnt;
@@ -301,7 +302,6 @@ typedef struct {
     /* For the NetBSD code */
     struct {
         void* ignoreAddr;
-        size_t numMajorFrames;
         const char* symsBlFile;
         char** symsBl;
         size_t symsBlCnt;

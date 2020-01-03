@@ -31,6 +31,7 @@
 #include <limits.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -38,6 +39,7 @@
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #if defined(_HF_ARCH_LINUX)
 #include <sys/syscall.h>
 #endif /* defined(_HF_ARCH_LINUX) */
@@ -311,8 +313,17 @@ int files_getTmpMapFlags(int flag, bool nocore) {
     return flag;
 }
 
-void* files_mapSharedMem(size_t sz, int* fd, const char* name, bool nocore) {
+void* files_mapSharedMem(size_t sz, int* fd, const char* name, bool nocore, bool export) {
     *fd = -1;
+
+    if (export) {
+        char path[PATH_MAX];
+        snprintf(path, sizeof(path), "./%s", name);
+        if ((*fd = open(path, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0644)) == -1) {
+            PLOG_W("open('%s')", path);
+            return NULL;
+        }
+    }
 
 #if defined(_HF_ARCH_LINUX)
 
@@ -327,7 +338,9 @@ void* files_mapSharedMem(size_t sz, int* fd, const char* name, bool nocore) {
 #endif /* !defined(__NR_memfd_create) */
 
 #if defined(__NR_memfd_create)
-    *fd = syscall(__NR_memfd_create, name, (uintptr_t)MFD_CLOEXEC);
+    if (*fd == -1) {
+        *fd = syscall(__NR_memfd_create, name, (uintptr_t)MFD_CLOEXEC);
+    }
 #endif /* defined__NR_memfd_create) */
 
 #endif /* defined(_HF_ARCH_LINUX) */
@@ -408,7 +421,7 @@ sa_family_t files_sockFamily(int sock) {
     return addr.sa_family;
 }
 
-const char* files_sockAddrToStr(const struct sockaddr* sa) {
+const char* files_sockAddrToStr(const struct sockaddr* sa, const socklen_t len) {
     static __thread char str[4096];
 
     if (sa->sa_family == AF_INET) {
@@ -427,6 +440,33 @@ const char* files_sockAddrToStr(const struct sockaddr* sa) {
         } else {
             snprintf(str, sizeof(str), "IPv6 addr conversion failed");
         }
+        return str;
+    }
+
+    if (sa->sa_family == AF_UNIX) {
+        if ((size_t)len <= offsetof(struct sockaddr_un, sun_path)) {
+            snprintf(str, sizeof(str), "unix:<struct too short at %u bytes>", (unsigned)len);
+            return str;
+        }
+
+        struct sockaddr_un* sun = (struct sockaddr_un*)sa;
+        int pathlen;
+
+        if (sun->sun_path[0] == '\0') {
+            /* Abstract socket
+             *
+             * TODO: Handle null bytes in sun->sun_path (they have no
+             * special significance unlike in C char arrays, see unix(7))
+             */
+            pathlen = strnlen(&sun->sun_path[1], len - offsetof(struct sockaddr_un, sun_path) - 1);
+
+            snprintf(str, sizeof(str), "unix:abstract:%-*s", pathlen, &sun->sun_path[1]);
+            return str;
+        }
+
+        pathlen = strnlen(sun->sun_path, len - offsetof(struct sockaddr_un, sun_path));
+
+        snprintf(str, sizeof(str), "unix:%-*s", pathlen, sun->sun_path);
         return str;
     }
 

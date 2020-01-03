@@ -103,9 +103,6 @@ static bool isLDMode(int argc, char** argv) {
         if (strcmp(argv[i], "-S") == 0) {
             return false;
         }
-        if (strcmp(argv[i], "-shared") == 0) {
-            return false;
-        }
     }
     return true;
 }
@@ -438,9 +435,13 @@ static int ldMode(int argc, char** argv) {
 
     /* Needed by the libhfcommon */
     args[j++] = "-pthread";
+    args[j++] = "-ldl";
 #if !defined(_HF_ARCH_DARWIN) && !defined(__OpenBSD__)
     args[j++] = "-lrt";
 #endif /* !defined(_HF_ARCH_DARWIN) && !defined(__OpenBSD__) */
+#if defined(__ANDROID__)
+    args[j++] = "-latomic";
+#endif
 
     /* Disable -fsanitize=fuzzer */
     if (isFSanitizeFuzzer(argc, argv)) {

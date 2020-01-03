@@ -60,12 +60,12 @@ extern uint8_t* files_mapFile(const char* fileName, off_t* fileSz, int* fd, bool
 
 extern int files_getTmpMapFlags(int flag, bool nocore);
 
-extern void* files_mapSharedMem(size_t sz, int* fd, const char* name, bool nocore);
+extern void* files_mapSharedMem(size_t sz, int* fd, const char* name, bool nocore, bool export);
 
 extern size_t files_parseSymbolFilter(const char* inFIle, char*** filterList);
 
 extern sa_family_t files_sockFamily(int sock);
 
-extern const char* files_sockAddrToStr(const struct sockaddr* sa);
+extern const char* files_sockAddrToStr(const struct sockaddr* sa, const socklen_t len);
 
 #endif /* ifndef HF_COMMON_FILES */
