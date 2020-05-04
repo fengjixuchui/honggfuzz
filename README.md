@@ -1,13 +1,15 @@
-# Description
+# Honggfuzz
+
+## Description
 
 A security oriented, feedback-driven, evolutionary, easy-to-use fuzzer with interesting analysis options. See the [Usage document](https://github.com/google/honggfuzz/blob/master/docs/USAGE.md) for a primer on Honggfuzz use.
 
-# Code
+## Code
 
-  * Latest stable version: [2.0](https://github.com/google/honggfuzz/releases)
+  * Latest stable version: [2.2](https://github.com/google/honggfuzz/releases)
   * [Changelog](https://github.com/google/honggfuzz/blob/master/CHANGELOG)
 
-# Features
+## Features
 
   * It's __multi-process__ and __multi-threaded__: there's no need to run multiple copies of your fuzzer, as honggfuzz can unlock potential of all your available CPU cores with a single running instance. The file corpus is automatically shared and improved between all fuzzed processes.
   * It's blazingly fast when the [persistent fuzzing mode](https://github.com/google/honggfuzz/blob/master/docs/PersistentFuzzing.md)) is used. A simple/empty _LLVMFuzzerTestOneInput_ function can be tested with __up to 1mo iterations per second__ on a relatively modern CPU (e.g. i7-6700K).
@@ -28,7 +30,7 @@ A security oriented, feedback-driven, evolutionary, easy-to-use fuzzer with inte
 
 ---
 
-# Requirements
+## Requirements
 
   * **Linux** - The BFD library (libbfd-dev) and libunwind (libunwind-dev/libunwind8-dev), clang-5.0 or higher for software-based coverage modes
   * **FreeBSD** - gmake, clang-5.0 or newer
@@ -38,7 +40,7 @@ A security oriented, feedback-driven, evolutionary, easy-to-use fuzzer with inte
   * **Darwin/OS X** - Xcode 10.8+
   * if **Clang/LLVM** is used to compile honggfuzz - link it with the BlocksRuntime Library (libblocksruntime-dev)
 
-# Trophies
+## Trophies
 
 Honggfuzz has been used to find a few interesting security problems in major software packages; An incomplete list:
 
@@ -85,7 +87,7 @@ Honggfuzz has been used to find a few interesting security problems in major sof
   * Stack corruption issues in the Windows OpenType parser: [#1](https://github.com/xinali/AfdkoFuzz/blob/4eadcb19eacb2fb73e4b0f0b34f382a9331bb3b4/CrashesAnalysis/CrashesAnalysis_3/README.md), [#2](https://github.com/xinali/AfdkoFuzz/blob/master/CVE-2019-1117/README.md), [#3](https://github.com/xinali/AfdkoFuzz/tree/f6d6562dd19403cc5a1f8cef603ee69425b68b20/CVE-2019-1118)
   * [Infinite loop in __NGINX Unit__](https://github.com/nginx/unit/commit/477e8177b70acb694759e62d830b8a311a736324)
   * A couple of problems in the [__MATLAB MAT File I/O Library__](https://sourceforge.net/projects/matio): [#1](https://github.com/tbeu/matio/commit/406438f497931f45fb3edf6de17d3a59a922c257), [#2](https://github.com/tbeu/matio/commit/406438f497931f45fb3edf6de17d3a59a922c257), [#3](https://github.com/tbeu/matio/commit/a55b9c2c01582b712d5a643699a13b5c41687db1), [#4](https://github.com/tbeu/matio/commit/3e6283f37652e29e457ab9467f7738a562594b6b), [#5](https://github.com/tbeu/matio/commit/783ee496a6914df68e77e6019054ad91e8ed6420)
-  * __Samba__ [tdbdump + tdbtool](http://seclists.org/oss-sec/2018/q2/206), [#2](https://github.com/samba-team/samba/commit/183da1f9fda6f58cdff5cefad133a86462d5942a), [#3](https://github.com/samba-team/samba/commit/33e9021cbee4c17ee2f11d02b99902a742d77293), [#4](https://github.com/samba-team/samba/commit/ac1be895d2501dc79dcff2c1e03549fe5b5a930c), [#5](https://github.com/samba-team/samba/commit/b1eda993b658590ebb0a8225e448ce399946ed83), [#6](https://github.com/samba-team/samba/commit/f7f92803f600f8d302cdbb668c42ca8b186a797f)
+  * __Samba__ [tdbdump + tdbtool](http://seclists.org/oss-sec/2018/q2/206), [#2](https://github.com/samba-team/samba/commit/183da1f9fda6f58cdff5cefad133a86462d5942a), [#3](https://github.com/samba-team/samba/commit/33e9021cbee4c17ee2f11d02b99902a742d77293), [#4](https://github.com/samba-team/samba/commit/ac1be895d2501dc79dcff2c1e03549fe5b5a930c), [#5](https://github.com/samba-team/samba/commit/b1eda993b658590ebb0a8225e448ce399946ed83), [#6](https://github.com/samba-team/samba/commit/f7f92803f600f8d302cdbb668c42ca8b186a797f) [CVE-2019-14907](https://www.samba.org/samba/security/CVE-2019-14907.html)
   * [Crash in __djvulibre__](https://github.com/barak/djvulibre/commit/89d71b01d606e57ecec2c2930c145bb20ba5bbe3)
   * [Multiple crashes in __VLC__](https://www.pentestpartners.com/security-blog/double-free-rce-in-vlc-a-honggfuzz-how-to/)
   * [Buffer overflow in __ClassiCube__](https://github.com/UnknownShadow200/ClassiCube/issues/591)
@@ -93,10 +95,13 @@ Honggfuzz has been used to find a few interesting security problems in major sof
   * [Heap buffer-overflow in __picoc__](https://gitlab.com/zsaleeba/picoc/issues/44)
   * Crashes in __OpenCOBOL__: [#1](https://sourceforge.net/p/open-cobol/bugs/586/), [#2](https://sourceforge.net/p/open-cobol/bugs/587/)
   * DoS in __ProFTPD__: [#1](https://twitter.com/SecReLabs/status/1186548245553483783), [#2](https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2019-18217)
+  * [Multiple security problems in ImageIO (iOS/MacOS)](https://googleprojectzero.blogspot.com/2020/04/fuzzing-imageio.html)
   * [Memory corruption in __htmldoc__](https://github.com/michaelrsweet/htmldoc/issues/370)
   * [Memory corruption in __OpenDetex__](https://github.com/pkubowicz/opendetex/issues/60)
   * [Memory corruption in __Yabasic__](https://github.com/marcIhm/yabasic/issues/36)
   * [Memory corruption in __Xfig__](https://sourceforge.net/p/mcj/tickets/67/)
+  * [Memory corruption in __LibreOffice__](https://github.com/LibreOffice/core/commit/0754e581b0d8569dd08cf26f88678754f249face)
+  * [Memory corruption in __ATasm__](https://sourceforge.net/p/atasm/bugs/8/)
   * __Rust__:
     * panic() in regex [#1](https://github.com/rust-lang/regex/issues/464), [#2](https://github.com/rust-lang/regex/issues/465), [#3](https://github.com/rust-lang/regex/issues/465#issuecomment-381412816)
     * panic() in h2 [#1](https://github.com/carllerche/h2/pull/260), [#2](https://github.com/carllerche/h2/pull/261), [#3](https://github.com/carllerche/h2/pull/262)
@@ -107,7 +112,7 @@ Honggfuzz has been used to find a few interesting security problems in major sof
     * crashes in rust-bitcoin/rust-lightning [#1](https://github.com/rust-bitcoin/rust-lightning/commit/a9aa3c37fe182dd266e0faebc788e0c9ee724783)
   * ... and more
 
-# Projects utilizing or inspired-by Honggfuzz
+## Projects utilizing or inspired-by Honggfuzz
 
   * [__QuickFuzz__ by CIFASIS](http://quickfuzz.org)
   * [__OSS-Fuzz__](https://github.com/google/oss-fuzz)
@@ -150,10 +155,17 @@ Honggfuzz has been used to find a few interesting security problems in major sof
   * [__libmutator__: a C library intended to generate random test cases by mutating legitimate test cases](https://github.com/denandz/libmutator)
   * [__StatZone__: a DNS zone file analyzer](https://github.com/fcambus/statzone)
   * [__shub-fuzz/honggfuzz__: singularity image for honggfuzz](https://github.com/shub-fuzz/honggfuzz)
+  * [__Code Intelligence__: fuzzing-as-a-service](https://www.code-intelligence.com/technology.html)
+  * [__SpecFuzz__: fuzzing for Spectre vulnerabilities](https://github.com/OleksiiOleksenko/SpecFuzz)
+  * [__rcc__: a Rust C compiler](https://github.com/jyn514/rcc#testing)
+  * [__EIP1962Fuzzing__: Fuzzy testing of various EIP1962 implementations](https://github.com/matter-labs/eip1962_fuzzing)
+  * [__wasm-fuzz__: Fuzzing of wasmer](https://github.com/wasmerio/wasm-fuzz/blob/master/honggfuzz.md), [blog post](https://medium.com/wasmer/fuzz-testing-in-webassembly-vms-3a301f982e5a)
+  * [__P0__: Fuzzing ImageIO](https://googleprojectzero.blogspot.com/2020/04/fuzzing-imageio.html)
+    * [__TrapFuzz__: by P0](https://github.com/googleprojectzero/p0tools/tree/master/TrapFuzz)
   * [__Rust's fuzztest__](https://docs.rs/crate/fuzztest)
     * [_and multiple Rust projecs_](https://github.com/search?q=%22extern+crate+honggfuzz%22&type=Code)
 
-# Contact
+## Contact
 
   * User mailing list: [honggfuzz@googlegroups.com](mailto:honggfuzz@googlegroups.com), sign up with [this link](https://groups.google.com/forum/#!forum/honggfuzz).
 

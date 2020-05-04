@@ -34,6 +34,7 @@ LDFLAGS ?=
 LIBS_CFLAGS ?= -fPIC -fno-stack-protector -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0  # fortify-source intercepts some functions, so we disable it for libraries
 GREP_COLOR ?=
 BUILD_OSSFUZZ_STATIC ?= false # for https://github.com/google/oss-fuzz
+BUILD_LINUX_NO_BFD ?= false # for users who don't want to use libbfd/binutils
 
 OS ?= $(shell uname -s)
 MARCH ?= $(shell uname -m)
@@ -51,8 +52,11 @@ ifeq ($(OS)$(findstring Microsoft,$(KERNEL)),Linux) # matches Linux but excludes
                             -lopcodes -lbfd -liberty -lz \
                             -Wl,-Bdynamic
     else
-            ARCH_LDFLAGS += -lunwind-ptrace -lunwind-generic -lunwind \
+            ARCH_LDFLAGS += -lunwind-ptrace -lunwind-generic -lunwind  -llzma \
                             -lopcodes -lbfd
+    endif
+    ifeq ($(BUILD_LINUX_NO_BFD),true)
+            ARCH_CFLAGS += -D_HF_LINUX_NO_BFD
     endif
     ARCH_LDFLAGS += -lrt -ldl -lm
 
@@ -70,7 +74,7 @@ ifeq ($(OS)$(findstring Microsoft,$(KERNEL)),Linux) # matches Linux but excludes
 else ifeq ($(OS),Darwin)
     ARCH := DARWIN
 
-    ARCH_SRCS := $(sort $(wildcard mac/*.c))
+    ARCH_SRCS := $(sort $(wildcard mac/*.c) mac/mach_excServer.c mac/mach_excUser.c)
 
     # MacOS-X grep seem to use colors unconditionally
     GREP_COLOR = --color=never
@@ -78,7 +82,9 @@ else ifeq ($(OS),Darwin)
     # Figure out which crash reporter to use.
     CRASHWRANGLER := third_party/mac
     OS_VERSION := $(shell sw_vers -productVersion)
-    ifneq (,$(findstring 10.14,$(OS_VERSION)))
+    ifneq (,$(findstring 10.15,$(OS_VERSION)))
+        CRASH_REPORT := $(CRASHWRANGLER)/CrashReport_Sierra.o
+    else ifneq (,$(findstring 10.14,$(OS_VERSION)))
         CRASH_REPORT := $(CRASHWRANGLER)/CrashReport_Sierra.o
     else ifneq (,$(findstring 10.13,$(OS_VERSION)))
         CRASH_REPORT := $(CRASHWRANGLER)/CrashReport_Sierra.o
@@ -154,11 +160,15 @@ ifeq ($(COMPILER),clang)
   ARCH_CFLAGS += -Wno-initializer-overrides -Wno-unknown-warning-option
   ARCH_CFLAGS += -Wno-gnu-empty-initializer -Wno-format-pedantic
   ARCH_CFLAGS += -Wno-gnu-statement-expression
+  ARCH_CFLAGS += -mllvm -inline-threshold=2000
   CFLAGS_BLOCKS = -fblocks
 
   ifneq ($(OS),Darwin)
     ARCH_LDFLAGS += -Wl,-Bstatic -lBlocksRuntime -Wl,-Bdynamic
   endif
+endif
+ifeq ($(COMPILER),gcc)
+  ARCH_CFLAGS += -finline-limit=4000
 endif
 
 SRCS := $(COMMON_SRCS) $(ARCH_SRCS)
@@ -248,9 +258,11 @@ all: $(BIN) $(HFUZZ_CC_BIN) $(LHFUZZ_ARCH) $(LHFUZZ_SHARED) $(LCOMMON_ARCH) $(LN
 %.o: %.c
 	$(CC) -c $(CFLAGS) $(CFLAGS_BLOCKS) -o $@ $<
 
-mac/arch.o: mac/arch.c
+mac/mach_exc.h mac/mach_excServer.c mac/mach_excServer.h mac/mach_excUser.c &:
 	mig -header mac/mach_exc.h -user mac/mach_excUser.c -sheader mac/mach_excServer.h \
 		-server mac/mach_excServer.c $(SDK)/usr/include/mach/mach_exc.defs
+
+mac/arch.o: mac/arch.c mac/mach_exc.h mac/mach_excServer.h
 	$(CC) -c $(CFLAGS) $(CFLAGS_BLOCKS) -o $@ $<
 
 %.so: %.c
@@ -278,7 +290,7 @@ $(LHFUZZ_ARCH): $(LHFUZZ_OBJS)
 	$(AR) rcs $(LHFUZZ_ARCH) $(LHFUZZ_OBJS)
 
 $(LHFUZZ_SHARED): $(LHFUZZ_OBJS) $(LCOMMON_OBJS)
-	$(LD) -shared $(LDFLAGS) $(LHFUZZ_OBJS) $(LCOMMON_OBJS) -o $@
+	$(LD) -shared $(LHFUZZ_OBJS) $(LCOMMON_OBJS) $(LDFLAGS) -o $@
 
 $(LNETDRIVER_OBJS): $(LNETDRIVER_SRCS)
 	$(CC) -c $(CFLAGS) $(LIBS_CFLAGS) -o $@ $(@:.o=.c)
@@ -292,9 +304,7 @@ clean:
 
 .PHONY: indent
 indent:
-	clang-format \
-	  -style="{BasedOnStyle: Google, IndentWidth: 4, ColumnLimit: 100, AlignAfterOpenBracket: DontAlign, AllowShortFunctionsOnASingleLine: false, AlwaysBreakBeforeMultilineStrings: false}" \
-	  -i -sort-includes  *.c *.h */*.c */*.h
+	clang-format -i -sort-includes  *.c *.h */*.c */*.h
 
 .PHONY: depend
 depend: all
@@ -417,11 +427,15 @@ libhfuzz/instrument.o: libhfcommon/common.h libhfcommon/log.h
 libhfuzz/linux.o: libhfcommon/common.h libhfcommon/files.h
 libhfuzz/linux.o: libhfcommon/common.h libhfcommon/log.h libhfcommon/ns.h
 libhfuzz/linux.o: libhfuzz/libhfuzz.h
-libhfuzz/memorycmp.o: libhfcommon/common.h libhfuzz/instrument.h
+libhfuzz/memorycmp.o: libhfcommon/common.h libhfcommon/util.h
+libhfuzz/memorycmp.o: libhfuzz/instrument.h
+libhfuzz/performance.o: libhfuzz/performance.h honggfuzz.h libhfcommon/util.h
+libhfuzz/performance.o: libhfcommon/log.h libhfuzz/instrument.h
 libhfuzz/persistent.o: honggfuzz.h libhfcommon/util.h libhfcommon/common.h
 libhfuzz/persistent.o: libhfcommon/files.h libhfcommon/common.h
 libhfuzz/persistent.o: libhfcommon/log.h libhfuzz/fetch.h
 libhfuzz/persistent.o: libhfuzz/instrument.h libhfuzz/libhfuzz.h
+libhfuzz/persistent.o: libhfuzz/performance.h
 linux/arch.o: arch.h honggfuzz.h libhfcommon/util.h fuzz.h
 linux/arch.o: libhfcommon/common.h libhfcommon/files.h libhfcommon/common.h
 linux/arch.o: libhfcommon/log.h libhfcommon/ns.h linux/perf.h linux/trace.h

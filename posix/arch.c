@@ -51,30 +51,30 @@
 #include "subproc.h"
 
 struct {
-    bool important;
+    bool        important;
     const char* descr;
 } arch_sigs[NSIG] = {
     [0 ...(NSIG - 1)].important = false,
-    [0 ...(NSIG - 1)].descr = "UNKNOWN",
+    [0 ...(NSIG - 1)].descr     = "UNKNOWN",
 
     [SIGILL].important = true,
-    [SIGILL].descr = "SIGILL",
+    [SIGILL].descr     = "SIGILL",
 
     [SIGFPE].important = true,
-    [SIGFPE].descr = "SIGFPE",
+    [SIGFPE].descr     = "SIGFPE",
 
     [SIGSEGV].important = true,
-    [SIGSEGV].descr = "SIGSEGV",
+    [SIGSEGV].descr     = "SIGSEGV",
 
     [SIGBUS].important = true,
-    [SIGBUS].descr = "SIGBUS",
+    [SIGBUS].descr     = "SIGBUS",
 
     [SIGABRT].important = true,
-    [SIGABRT].descr = "SIGABRT",
+    [SIGABRT].descr     = "SIGABRT",
 
     /* Is affected from tmout_vtalrm flag */
     [SIGVTALRM].important = false,
-    [SIGVTALRM].descr = "SIGVTALRM-TMOUT",
+    [SIGVTALRM].descr     = "SIGVTALRM-TMOUT",
 };
 
 /*
@@ -117,10 +117,10 @@ static void arch_analyzeSignal(run_t* run, pid_t pid, int status) {
     defer {
         free(funcs);
     };
-    uint64_t pc = 0;
-    uint64_t crashAddr = 0;
-    char description[HF_STR_LEN] = {};
-    size_t funcCnt = sanitizers_parseReport(run, pid, funcs, &pc, &crashAddr, description);
+    uint64_t pc                      = 0;
+    uint64_t crashAddr               = 0;
+    char     description[HF_STR_LEN] = {};
+    size_t   funcCnt = sanitizers_parseReport(run, pid, funcs, &pc, &crashAddr, description);
 
     /*
      * Calculate backtrace callstack hash signature
@@ -139,7 +139,7 @@ static void arch_analyzeSignal(run_t* run, pid_t pid, int status) {
     /* If dry run mode, copy file with same name into workspace */
     if (run->global->mutate.mutationsPerRun == 0U && run->global->cfg.useVerifier) {
         snprintf(run->crashFileName, sizeof(run->crashFileName), "%s/%s", run->global->io.crashDir,
-            run->origFileName);
+            run->dynfile->path);
     } else if (saveUnique) {
         snprintf(run->crashFileName, sizeof(run->crashFileName),
             "%s/%s.PC.%" PRIx64 ".STACK.%" PRIx64 ".ADDR.%" PRIx64 ".%s", run->global->io.crashDir,
@@ -167,7 +167,7 @@ static void arch_analyzeSignal(run_t* run, pid_t pid, int status) {
     /* If unique crash found, reset dynFile counter */
     ATOMIC_CLEAR(run->global->cfg.dynFileIterExpire);
 
-    if (files_writeBufToFile(run->crashFileName, run->dynamicFile, run->dynamicFileSz,
+    if (files_writeBufToFile(run->crashFileName, run->dynfile->data, run->dynfile->size,
             O_CREAT | O_EXCL | O_WRONLY) == false) {
         LOG_E("Couldn't save crash to '%s'", run->crashFileName);
     }
@@ -180,31 +180,9 @@ pid_t arch_fork(run_t* fuzzer HF_ATTR_UNUSED) {
 }
 
 bool arch_launchChild(run_t* run) {
-#define ARGS_MAX 512
-    const char* args[ARGS_MAX + 2];
-    char argData[PATH_MAX];
-    const char inputFile[] = "/dev/fd/" HF_XSTR(_HF_INPUT_FD);
-
-    int x;
-    for (x = 0; x < ARGS_MAX && x < run->global->exe.argc; x++) {
-        if (!strcmp(run->global->exe.cmdline[x], _HF_FILE_PLACEHOLDER)) {
-            args[x] = inputFile;
-        } else if (strstr(run->global->exe.cmdline[x], _HF_FILE_PLACEHOLDER)) {
-            const char* off = strstr(run->global->exe.cmdline[x], _HF_FILE_PLACEHOLDER);
-            snprintf(argData, sizeof(argData), "%.*s%s", (int)(off - run->global->exe.cmdline[x]),
-                run->global->exe.cmdline[x], inputFile);
-            args[x] = argData;
-        } else {
-            args[x] = run->global->exe.cmdline[x];
-        }
-    }
-    args[x++] = NULL;
-
-    LOG_D("Launching '%s' on file '%s'", args[0], inputFile);
-
     /* alarm persists across forks, so disable it here */
     alarm(0);
-    execvp(args[0], (char* const*)args);
+    execvp(run->args[0], (char* const*)run->args);
     alarm(1);
 
     return false;
@@ -219,7 +197,7 @@ void arch_prepareParentAfterFork(run_t* fuzzer HF_ATTR_UNUSED) {
 static bool arch_checkWait(run_t* run) {
     /* All queued wait events must be tested when SIGCHLD was delivered */
     for (;;) {
-        int status;
+        int   status;
         pid_t pid = TEMP_FAILURE_RETRY(waitpid(run->pid, &status, WNOHANG));
         if (pid == 0) {
             return false;
@@ -261,7 +239,7 @@ void arch_reapChild(run_t* run) {
 
         if (run->global->exe.persistent) {
             struct pollfd pfd = {
-                .fd = run->persistentSock,
+                .fd     = run->persistentSock,
                 .events = POLLIN,
             };
             int r = poll(&pfd, 1, 250 /* 0.25s */);
