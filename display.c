@@ -21,17 +21,17 @@
  *
  */
 
-#define _WITH_DPRINTF
-
 #include "display.h"
 
 #include <errno.h>
 #include <inttypes.h>
-#include <math.h>
 #include <stdarg.h>
+#include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "libhfcommon/common.h"
@@ -315,7 +315,7 @@ void display_display(honggfuzz_t* hfuzz) {
     display_stop();
 }
 
-void display_fini(void) {
+static void display_fini(void) {
     display_imm(ESC_SCROLL_RESET ESC_NAV_DOWN(500));
 }
 
