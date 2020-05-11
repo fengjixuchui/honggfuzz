@@ -393,8 +393,7 @@ mangle.o: libhfcommon/common.h libhfcommon/log.h
 report.o: report.h honggfuzz.h libhfcommon/util.h sanitizers.h
 report.o: libhfcommon/log.h
 sanitizers.o: sanitizers.h honggfuzz.h libhfcommon/util.h cmdline.h
-sanitizers.o: libhfcommon/common.h libhfcommon/files.h libhfcommon/common.h
-sanitizers.o: libhfcommon/log.h
+sanitizers.o: libhfcommon/common.h libhfcommon/log.h
 socketfuzzer.o: socketfuzzer.h honggfuzz.h libhfcommon/util.h
 socketfuzzer.o: libhfcommon/common.h libhfcommon/files.h libhfcommon/common.h
 socketfuzzer.o: libhfcommon/log.h libhfcommon/ns.h
@@ -418,8 +417,7 @@ libhfnetdriver/netdriver.o: libhfcommon/util.h libhfcommon/common.h
 libhfnetdriver/netdriver.o: libhfcommon/files.h libhfcommon/common.h
 libhfnetdriver/netdriver.o: libhfcommon/log.h libhfcommon/ns.h
 libhfuzz/fetch.o: libhfuzz/fetch.h honggfuzz.h libhfcommon/util.h
-libhfuzz/fetch.o: libhfcommon/common.h libhfcommon/files.h
-libhfuzz/fetch.o: libhfcommon/common.h libhfcommon/log.h
+libhfuzz/fetch.o: libhfcommon/files.h libhfcommon/common.h libhfcommon/log.h
 libhfuzz/instrument.o: libhfuzz/instrument.h honggfuzz.h libhfcommon/util.h
 libhfuzz/instrument.o: libhfcommon/common.h libhfcommon/files.h
 libhfuzz/instrument.o: libhfcommon/common.h libhfcommon/log.h

@@ -747,7 +747,8 @@ static void arch_traceEvent(int status, pid_t pid) {
                 LOG_D(
                     "PID: %d terminated with signal: %lu", pid, (unsigned long)WTERMSIG(event_msg));
             } else {
-                LOG_D("PID: %d exited with unknown status: %lu", pid, event_msg);
+                LOG_D("PID: %d exited with unknown status: %lu (%s)", pid, event_msg,
+                    subproc_StatusToStr(event_msg));
             }
         } break;
         default:
@@ -876,7 +877,8 @@ bool arch_traceWaitForPidStop(pid_t pid) {
             return false;
         }
         if (!WIFSTOPPED(status)) {
-            LOG_W("PID %d not in a stopped state - status:%d", pid, status);
+            LOG_W("PID %d not in a stopped state - status:%d (%s)", pid, status,
+                subproc_StatusToStr(status));
             return false;
         }
         return true;

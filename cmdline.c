@@ -259,6 +259,11 @@ static bool cmdlineVerify(honggfuzz_t* hfuzz) {
         return false;
     }
 
+    if (hfuzz->io.outputDir && mkdir(hfuzz->io.outputDir, 0700) == -1 && errno != EEXIST) {
+        PLOG_E("Couldn't create the output directory '%s'", hfuzz->io.outputDir);
+        return false;
+    }
+
     if (strlen(hfuzz->io.workDir) == 0) {
         if (getcwd(hfuzz->io.workDir, sizeof(hfuzz->io.workDir)) == NULL) {
             PLOG_W("getcwd() failed. Using '.'");
@@ -443,7 +448,7 @@ bool cmdlineParse(int argc, char* argv[], honggfuzz_t* hfuzz) {
                 .symsWlCnt            = 0,
                 .symsWl               = NULL,
                 .cloneFlags           = 0,
-                .useNetNs             = HF_MAYBE,
+                .useNetNs             = HF_NO,
                 .kernelOnly           = false,
                 .useClone             = true,
             },
@@ -550,7 +555,7 @@ bool cmdlineParse(int argc, char* argv[], honggfuzz_t* hfuzz) {
     int           opt_index = 0;
     for (;;) {
         int c = getopt_long(
-            argc, argv, "-?hQvVsuPxf:i:dqe:W:r:c:F:t:R:n:N:l:p:g:E:w:B:zMTS", opts, &opt_index);
+            argc, argv, "-?hQvVsuPxf:i:o:dqe:W:r:c:F:t:R:n:N:l:p:g:E:w:B:zMTS", opts, &opt_index);
         if (c < 0) {
             break;
         }
