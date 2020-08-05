@@ -33,6 +33,10 @@ const char *const LIBHFNETDRIVER_module_netdriver = _HF_NETDRIVER_SIG;
 #define HFND_SOCK_PATH_ENV    "HFND_SOCK_PATH"
 #define HFND_SKIP_FUZZING_ENV "HFND_SKIP_FUZZING"
 
+/* Define this to use receiving timeouts
+#define HFND_RECVTIME 10
+*/
+
 static char *initial_server_argv[] = {"fuzzer", NULL};
 
 static struct {
@@ -431,14 +435,45 @@ int LLVMFuzzerTestOneInput(const uint8_t *buf, size_t len) {
         PLOG_F("shutdown(sock=%d, SHUT_WR)", sock);
     }
 
+#ifdef HFND_RECVTIME
+    const struct timeval timeout = {.tv_sec = 1, .tv_usec = 0};
+    if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) == -1) {
+        PLOG_W("Honggfuzz Net Driver (pid=%d): Couldn't set setsockopt(sock=%d, SO_RCVTIMEO, 1s)",
+            (int)getpid(), sock);
+    }
+    time_t start = time(NULL);
+#endif
+
     /*
      * Try to read data from the server, assuming that an early TCP close would sometimes cause the
      * TCP server to drop the input data, instead of processing it. Use BSS to avoid putting
      * pressure on the stack size
      */
     static char b[1024ULL * 1024ULL * 4ULL];
-    while (TEMP_FAILURE_RETRY(recv(sock, b, sizeof(b), MSG_WAITALL)) > 0)
-        ;
+    for (;;) {
+        int ret = TEMP_FAILURE_RETRY(recv(sock, b, sizeof(b), MSG_WAITALL));
+        if (ret == 0) {
+            break;
+        }
+#ifdef HFND_RECVTIME
+        if (ret == -1 && errno == EWOULDBLOCK) {
+            time_t end = time(NULL);
+            if ((end - start) > HFND_RECVTIME) {
+                LOG_W("Honggfuzz Net Driver (pid=%d): Server didn't close the connection(fd=%d) "
+                      "within %d seconds. Closing it.",
+                    (int)getpid(), sock, HFND_RECVTIME);
+                break;
+            }
+            continue;
+        }
+#endif
+        if (ret == -1) {
+            PLOG_W("Honggfuzz Net Driver (pid=%d): Connection to the server (sock=%d) closed with "
+                   "error",
+                (int)getpid(), sock);
+            break;
+        }
+    }
 
     close(sock);
 

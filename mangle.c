@@ -46,7 +46,7 @@ static inline size_t mangle_LenLeft(run_t* run, size_t off) {
     return (run->dynfile->size - off - 1);
 }
 
-/* Get a random value between <1:max> with x^2 distribution */
+/* Get a random value <1:max>, but prefer smaller ones - up to 8KiB */
 static inline size_t mangle_getLen(size_t max) {
     if (max > _HF_INPUT_MAX_SIZE) {
         LOG_F("max (%zu) > _HF_INPUT_MAX_SIZE (%zu)", max, (size_t)_HF_INPUT_MAX_SIZE);
@@ -58,22 +58,25 @@ static inline size_t mangle_getLen(size_t max) {
         return 1;
     }
 
-    const uint64_t max2 = (uint64_t)max * max;
-    const uint64_t max3 = (uint64_t)max * max * max;
-    const uint64_t rnd  = util_rndGet(1, max2 - 1);
-
-    uint64_t ret = rnd * rnd;
-    ret /= max3;
-    ret += 1;
-
-    if (ret < 1) {
-        LOG_F("ret (%" PRIu64 ") < 1, max:%zu, rnd:%" PRIu64, ret, max, rnd);
+    /* Give 50% chance the the uniform distribution */
+    switch (util_rndGet(0, 11)) {
+        case 0:
+            return (size_t)util_rndGet(1, HF_MIN(8, max));
+        case 1:
+            return (size_t)util_rndGet(1, HF_MIN(32, max));
+        case 2:
+            return (size_t)util_rndGet(1, HF_MIN(128, max));
+        case 3:
+            return (size_t)util_rndGet(1, HF_MIN(512, max));
+        case 4:
+            return (size_t)util_rndGet(1, HF_MIN(2048, max));
+        case 5:
+            return (size_t)util_rndGet(1, HF_MIN(8192, max));
+        default:
+            break;
     }
-    if (ret > max) {
-        LOG_F("ret (%" PRIu64 ") > max (%zu), rnd:%" PRIu64, ret, max, rnd);
-    }
 
-    return (size_t)ret;
+    return (size_t)util_rndGet(1, max);
 }
 
 /* Prefer smaller values here, so use mangle_getLen() */
