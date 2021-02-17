@@ -162,6 +162,9 @@ static int execCC(int argc, char** argv) {
         if (isCXX) {
             /* Try the default one, then the newest ones (hopefully) in order */
             hf_execvp("clang++", argv);
+            hf_execvp("clang++-12.0", argv);
+            hf_execvp("clang++-12", argv);
+            hf_execvp("clang++12", argv);
             hf_execvp("clang++-11.0", argv);
             hf_execvp("clang++-11", argv);
             hf_execvp("clang++11", argv);
@@ -181,6 +184,9 @@ static int execCC(int argc, char** argv) {
         } else {
             /* Try the default one, then the newest ones (hopefully) in order */
             hf_execvp("clang", argv);
+            hf_execvp("clang-12.0", argv);
+            hf_execvp("clang-12", argv);
+            hf_execvp("clang12", argv);
             hf_execvp("clang-11.0", argv);
             hf_execvp("clang-11", argv);
             hf_execvp("clang11", argv);
@@ -314,10 +320,10 @@ static void commonPreOpts(int* j, char** args) {
      * (and better code coverage estimates)
      */
     if (isGCC) {
-        args[(*j)++] = "-finline-limit=4000";
+        args[(*j)++] = "-finline-limit=1000";
     } else {
         args[(*j)++] = "-mllvm";
-        args[(*j)++] = "-inline-threshold=2000";
+        args[(*j)++] = "-inline-threshold=1000";
     }
     args[(*j)++] = "-fno-builtin";
     args[(*j)++] = "-fno-omit-frame-pointer";
